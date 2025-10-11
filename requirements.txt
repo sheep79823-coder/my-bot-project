@@ -17,6 +17,7 @@ future==1.0.0
 google-auth==2.41.1
 google-auth-oauthlib==1.2.2
 gspread==6.2.1
+gunicorn==23.0.0
 idna==3.10
 itsdangerous==2.2.0
 Jinja2==3.1.6
@@ -25,6 +26,7 @@ MarkupSafe==3.0.3
 multidict==6.7.0
 numpy==2.3.3
 oauthlib==3.3.1
+packaging==25.0
 pandas==2.3.3
 propcache==0.4.1
 pyasn1==0.6.1
