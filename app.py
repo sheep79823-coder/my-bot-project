@@ -14,6 +14,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import threading
 import time
 import hashlib
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- 初始設定 ---
 app = Flask(__name__)
@@ -25,7 +26,8 @@ GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
 ALLOWED_USER_IDS = ["U724ac19c55418145a5af5aa1af558cbb"]
 GOOGLE_SHEET_NAME = "我的工務助理資料庫"
 WORKSHEET_NAME = "出勤總表"
-ATTENDANCE_SHEET_NAME = "出勤時數計算"  # [新增] 新的工作表用於儲存時數
+ATTENDANCE_SHEET_NAME = "出勤時數計算"
+DAILY_SUMMARY_SHEET = "每日統整"
 
 line_bot_api = LineBotApi(YOUR_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(YOUR_CHANNEL_SECRET)
@@ -41,22 +43,30 @@ try:
     gsheet_client = gspread.authorize(creds)
     worksheet = gsheet_client.open(GOOGLE_SHEET_NAME).worksheet(WORKSHEET_NAME)
     
-    # [新增] 嘗試取得出勤時數表，如果沒有則建立
     try:
         attendance_sheet = gsheet_client.open(GOOGLE_SHEET_NAME).worksheet(ATTENDANCE_SHEET_NAME)
     except gspread.exceptions.WorksheetNotFound:
         workbook = gsheet_client.open(GOOGLE_SHEET_NAME)
         attendance_sheet = workbook.add_worksheet(title=ATTENDANCE_SHEET_NAME, rows=1000, cols=10)
-        # 設定標題列
         headers = ["日期", "姓名", "簽到時間", "離場時間", "出勤時數", "備註", "更新時間"]
         attendance_sheet.append_row(headers)
-        print("✅ 已建立新的出勤時數計算表")
+        print("✅ 已建立出勤時數計算表")
+    
+    try:
+        summary_sheet = gsheet_client.open(GOOGLE_SHEET_NAME).worksheet(DAILY_SUMMARY_SHEET)
+    except gspread.exceptions.WorksheetNotFound:
+        workbook = gsheet_client.open(GOOGLE_SHEET_NAME)
+        summary_sheet = workbook.add_worksheet(title=DAILY_SUMMARY_SHEET, rows=1000, cols=10)
+        headers = ["統計日期", "姓名", "總出勤天數", "統計時間"]
+        summary_sheet.append_row(headers)
+        print("✅ 已建立每日統整表")
     
     print("✅ Google Sheets 連線成功！")
 except Exception as e:
     print(f"❌ Google Sheets 連線失敗: {e}")
     worksheet = None
     attendance_sheet = None
+    summary_sheet = None
 
 def keep_alive():
     while True:
@@ -90,89 +100,140 @@ def is_duplicate_message(user_id, message_text, timestamp):
     processed_messages[msg_hash] = current_time
     return False
 
-# --- [改進] 對話狀態管理 - 加入時間追蹤 ---
+# --- 即時寫入 Google Sheets 的函式 ---
+def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, note=""):
+    """立即將一個人的簽到資料寫入 Google Sheets"""
+    if not attendance_sheet:
+        return False
+    
+    try:
+        update_time = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=8))
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        
+        new_row = [
+            work_date,
+            person_name,
+            sign_in_time.strftime('%H:%M') if sign_in_time else "",
+            "",  # 離場時間（先空著）
+            "",  # 出勤時數（先空著）
+            note,
+            update_time
+        ]
+        attendance_sheet.append_row(new_row)
+        print(f"✅ 已即時寫入 {person_name} 的簽到記錄")
+        return True
+    except Exception as e:
+        print(f"❌ 寫入失敗: {e}")
+        return False
+
+def update_person_checkout(work_date, person_name, checkout_time, days, remark=""):
+    """更新一個人的離場時間和出勤天數"""
+    if not attendance_sheet:
+        return False
+    
+    try:
+        # 取得所有記錄
+        records = attendance_sheet.get_all_records()
+        
+        # 找到對應的記錄
+        for i, record in enumerate(records, start=2):  # 從第2行開始（跳過標題）
+            if record['日期'] == work_date and record['姓名'] == person_name and not record['離場時間']:
+                # 更新這一行
+                attendance_sheet.update_cell(i, 4, checkout_time.strftime('%H:%M'))  # D列 離場時間
+                attendance_sheet.update_cell(i, 5, days)  # E列 出勤時數
+                attendance_sheet.update_cell(i, 6, remark)  # F列 備註
+                print(f"✅ 已更新 {person_name} 的離場時間和出勤天數")
+                return True
+        
+        print(f"⚠️ 找不到 {person_name} 的簽到記錄")
+        return False
+    except Exception as e:
+        print(f"❌ 更新失敗: {e}")
+        return False
+
+# --- 每日統整函式 ---
+def daily_summary():
+    """每天 22:00 執行統整"""
+    print("\n" + "="*50)
+    print("🕙 22:00 每日統整開始")
+    print("="*50)
+    
+    if not attendance_sheet or not summary_sheet:
+        print("❌ 工作表連線失敗")
+        return
+    
+    try:
+        today = date.today()
+        minguo_year = today.year - 1911
+        today_str = f"{minguo_year:03d}/{today.month:02d}/{today.day:02d}"
+        
+        records = attendance_sheet.get_all_records()
+        df = pd.DataFrame(records)
+        
+        # 篩選今天的記錄
+        today_df = df[df['日期'] == today_str]
+        
+        if today_df.empty:
+            print(f"ℹ️ {today_str} 沒有出勤記錄")
+            return
+        
+        # 按姓名分組，計算總出勤天數
+        summary_by_name = today_df.groupby('姓名')['出勤時數'].sum().reset_index()
+        summary_by_name.columns = ['姓名', '總出勤天數']
+        
+        # 寫入統整表
+        update_time = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=8))
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        
+        for _, row in summary_by_name.iterrows():
+            summary_row = [today_str, row['姓名'], row['總出勤天數'], update_time]
+            summary_sheet.append_row(summary_row)
+        
+        print(f"✅ 已統整 {len(summary_by_name)} 人的 {today_str} 出勤資料")
+        
+    except Exception as e:
+        print(f"❌ 統整失敗: {e}")
+
+# --- 排程設定 ---
+scheduler = BackgroundScheduler()
+
+def start_scheduler():
+    """啟動排程器"""
+    scheduler.add_job(daily_summary, 'cron', hour=22, minute=0)
+    scheduler.start()
+    print("✅ 已啟動每日 22:00 統整排程")
+
+start_scheduler()
+
+# --- 對話狀態管理 ---
 class DailySession:
     def __init__(self, user_id, work_date):
         self.user_id = user_id
         self.work_date = work_date
         self.project_name = None
-        self.staff = []  # [{"name": "", "add_time": datetime, "remove_time": None, "note": ""}]
-        self.head_count = 0
-        self.lunch_count = 0
-        self.submitted = False
+        self.staff = []
         self.created_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-        self.end_time = None
     
-    def add_staff(self, name, note=None, add_time=None):
+    def add_staff_and_write(self, name, note=None, add_time=None):
+        """新增人員並立即寫入 Google Sheets"""
         if add_time is None:
             add_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
         
         if name not in [s['name'] for s in self.staff]:
-            self.staff.append({
-                "name": name,
-                "add_time": add_time,
-                "remove_time": None,
-                "note": note
-            })
-            self.head_count += 1
-            self.lunch_count += 1
-            return True
-        return False
-    
-    def remove_staff(self, name, remove_time=None):
-        if remove_time is None:
-            remove_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-        
-        for person in self.staff:
-            if person['name'] == name:
-                person['remove_time'] = remove_time
+            # 立即寫入 Google Sheets
+            if write_person_to_sheet(self.work_date, self.project_name, name, add_time, note or ""):
+                self.staff.append({"name": name, "add_time": add_time, "note": note})
                 return True
         return False
     
-    def set_end_time(self, end_time=None):
-        if end_time is None:
-            end_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-        self.end_time = end_time
-    
-    def calculate_attendance_days(self, person):
-        """根據時間計算出勤天數"""
-        add_time = person['add_time']
-        remove_time = person['remove_time'] if person['remove_time'] else self.end_time
-        
-        if not add_time or not remove_time:
-            return 0, "時間不完整"
-        
-        add_hour = add_time.hour
-        remove_hour = remove_time.hour
-        
-        # 邏輯：10:00後新增算1天，13:00後新增算0.5天
-        #      12:00前離場算0.5天，其他情況特別備註
-        
-        if add_hour < 10:
-            if remove_hour >= 12:
-                return 1.0, ""  # 整天
-            elif remove_hour >= 10:
-                return 0.5, "上班但早退"
-            else:
-                return 0.5, "上午半天"
-        elif add_hour < 13:
-            if remove_hour >= 13:
-                return 1.0, ""
-            else:
-                return 0.5, "上午半天"
-        else:  # 13:00後新增
-            if remove_hour >= 13:
-                return 0.5, "下午半天"
-            else:
-                return 0.5, f"({add_time.strftime('%H:%M')}-{remove_time.strftime('%H:%M')})"
-    
     def get_summary(self):
         summary = f"📋 {self.work_date}\n"
-        summary += f"👥 目前人數: {self.head_count} 人\n"
+        summary += f"👥 目前人數: {len(self.staff)} 人\n"
         summary += "人員:\n"
         for i, person in enumerate(self.staff, 1):
-            remove_status = " ✓已離場" if person['remove_time'] else ""
-            summary += f"  {i}. {person['name']}{remove_status}\n"
+            summary += f"  {i}. {person['name']}\n"
         return summary
 
 def get_or_create_session(user_id, work_date):
@@ -183,40 +244,56 @@ def get_or_create_session(user_id, work_date):
 
 def parse_full_attendance_report(text):
     try:
-        pattern = re.compile(
-            r"^(?P<date>\d{3}/\d{2}/\d{2})\n"
-            r"(?P<project_name>.+)\n\n"
-            r"出工人員：\n"
-            r"(?P<names_block>(?:.*\n)+?)\n"
-            r"共計：(?P<head_count>\d+)人\n\n"
-            r"便當：(?P<lunch_box_count>\d+)個$",
-            re.MULTILINE
-        )
-        match = pattern.search(text.strip())
-        if not match:
+        lines = text.strip().split('\n')
+        if len(lines) < 2:
             return None
-            
-        data = match.groupdict()
+        
+        date_match = re.match(r"^(\d{3}/\d{2}/\d{2})", lines[0])
+        if not date_match:
+            return None
+        work_date = date_match.group(1)
+        
+        project_name = lines[1].strip()
+        if not project_name:
+            return None
+        
+        staff_start_idx = None
+        for i, line in enumerate(lines):
+            if "人員" in line or "出工" in line:
+                staff_start_idx = i + 1
+                break
+        
+        if staff_start_idx is None:
+            staff_start_idx = 2
+        
         staff_list = []
         
-        for line in data['names_block'].strip().splitlines():
-            if not line.strip():
-                continue
-            clean_line = re.sub(r"^\d+\.", "", line).strip()
-            note_match = re.search(r"\((.+)\)", clean_line)
+        for i in range(staff_start_idx, len(lines)):
+            line = lines[i].strip()
             
+            if not line:
+                continue
+            
+            if "共計" in line or "便當" in line or "總計" in line:
+                continue
+            
+            clean_line = re.sub(r"^\d+[\.\、]", "", line).strip()
+            
+            note_match = re.search(r"\((.+)\)", clean_line)
             if note_match:
                 note = note_match.group(1)
                 name = clean_line[:note_match.start()].strip()
                 staff_list.append({"name": name, "note": note})
             else:
-                staff_list.append({"name": clean_line, "note": None})
+                if clean_line:
+                    staff_list.append({"name": clean_line, "note": None})
+        
+        if not staff_list:
+            return None
         
         return {
-            "date": data["date"],
-            "project_name": data["project_name"].strip(),
-            "head_count": int(data["head_count"]),
-            "lunch_box_count": int(data["lunch_box_count"]),
+            "date": work_date,
+            "project_name": project_name,
             "staff": staff_list
         }
     except Exception as e:
@@ -231,55 +308,14 @@ def parse_add_staff(text):
         return {"name": name, "note": note}
     return None
 
-def submit_session_to_attendance_sheet(session):
-    """將對話狀態中的資料提交到出勤時數計算表"""
-    if not attendance_sheet or not session.staff:
-        return False
-    
-    try:
-        update_time = datetime.datetime.now(
-            datetime.timezone(datetime.timedelta(hours=8))
-        ).strftime('%Y-%m-%d %H:%M:%S')
-        
-        rows_added = 0
-        for person in session.staff:
-            days, remark = session.calculate_attendance_days(person)
-            
-            new_row = [
-                session.work_date,
-                person['name'],
-                person['add_time'].strftime('%H:%M') if person['add_time'] else "",
-                person['remove_time'].strftime('%H:%M') if person['remove_time'] else "",
-                days,
-                remark,
-                update_time
-            ]
-            attendance_sheet.append_row(new_row)
-            rows_added += 1
-        
-        session.submitted = True
-        print(f"✅ 成功提交 {rows_added} 人的出勤時數")
-        return True
-    except Exception as e:
-        print(f"❌ 提交錯誤: {e}")
-        return False
-
-def get_current_period_dates():
-    today = date.today()
-    if 6 <= today.day <= 20:
-        start_date = today.replace(day=6)
-        end_date = today.replace(day=20)
-    elif today.day >= 21:
-        start_date = today.replace(day=21)
-        next_month_year = today.year if today.month < 12 else today.year + 1
-        next_month = today.month + 1 if today.month < 12 else 1
-        end_date = date(next_month_year, next_month, 5)
+def calculate_attendance_days(add_hour):
+    """根據簽到時間計算出勤天數"""
+    if add_hour < 10:
+        return 1.0, ""
+    elif add_hour < 13:
+        return 1.0, ""
     else:
-        end_date = today.replace(day=5)
-        last_month_year = today.year if today.month > 1 else today.year - 1
-        last_month = today.month - 1 if today.month > 1 else 12
-        start_date = date(last_month_year, last_month, 21)
-    return start_date, end_date
+        return 0.5, "下午半天"
 
 def minguo_to_gregorian(minguo_str):
     try:
@@ -323,73 +359,66 @@ def handle_message(event):
         reply_text = "無法識別的指令或格式錯誤。"
 
         # --- 完整日報提交 ---
-        if "出工人員：" in message_text:
+        if re.search(r"\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
             print("📝 檢測到完整日報")
             report_data = parse_full_attendance_report(message_text)
             
             if report_data:
                 session = get_or_create_session(user_id, report_data['date'])
                 session.project_name = report_data['project_name']
-                session.head_count = report_data['head_count']
-                session.lunch_count = report_data['lunch_box_count']
                 
+                # 立即寫入所有人員到 Google Sheets
                 for staff in report_data['staff']:
-                    session.add_staff(staff['name'], staff['note'], add_time=message_time)
+                    session.add_staff_and_write(staff['name'], staff['note'], message_time)
                 
                 reply_text = session.get_summary()
-                reply_text += "\n✅ 已記錄初始日報\n提示: 發送 '新增：名字' 或 '人員離場' 來更新"
+                reply_text += "\n✅ 已記錄初始日報並寫入 Google Sheets\n"
+                reply_text += "💡 新增人員或發送 '人員離場' 來更新\n"
+                reply_text += "📊 每天 22:00 自動統整出勤時數"
             else:
                 reply_text = "❌ 日報格式錯誤"
 
         # --- 新增人員 ---
         elif "新增" in message_text:
             print("➕ 檢測到新增人員")
-            staff_info = parse_add_staff(message_text)
             
-            if not staff_info:
-                reply_text = "❌ 新增格式錯誤，請用 '新增：名字' 或 '新增：名字 (備註)'"
-            else:
-                # [修正] 先找有效的 Session（最後一個有日報的 Session）
-                valid_session = None
-                for session_key, session in session_states.items():
-                    if session.user_id == user_id and session.project_name:
-                        valid_session = session
-                
-                if valid_session:
-                    if valid_session.add_staff(staff_info['name'], staff_info['note'], add_time=message_time):
-                        reply_text = f"✅ 已新增 {staff_info['name']} (時間: {message_time.strftime('%H:%M')})\n\n" + valid_session.get_summary()
+            valid_session = None
+            for session_key, session in session_states.items():
+                if session.user_id == user_id and session.project_name:
+                    valid_session = session
+            
+            if valid_session:
+                staff_info = parse_add_staff(message_text)
+                if staff_info:
+                    if valid_session.add_staff_and_write(staff_info['name'], staff_info['note'], message_time):
+                        reply_text = f"✅ 已新增 {staff_info['name']} (時間: {message_time.strftime('%H:%M')})\n"
+                        reply_text += f"已立即寫入 Google Sheets\n\n" + valid_session.get_summary()
                     else:
                         reply_text = f"⚠️ {staff_info['name']} 已在清單中"
                 else:
-                    reply_text = "❌ 請先提交完整日報"
+                    reply_text = "❌ 新增格式錯誤，請用 '新增：名字'"
+            else:
+                reply_text = "❌ 請先提交完整日報"
 
         # --- 人員離場/記錄結束 ---
         elif "人員離場" in message_text or "人員下班" in message_text:
             print("⬜ 檢測到記錄結束")
             
-            # [修正] 先找有效的 Session
             valid_session = None
             for session_key, session in session_states.items():
-                if session.user_id == user_id and session.project_name and not session.submitted:
+                if session.user_id == user_id and session.project_name:
                     valid_session = session
             
             if valid_session:
-                valid_session.set_end_time(message_time)
+                # 更新所有人員的離場時間
+                for person in valid_session.staff:
+                    add_hour = person['add_time'].hour
+                    days, remark = calculate_attendance_days(add_hour)
+                    update_person_checkout(valid_session.work_date, person['name'], message_time, days, remark)
                 
-                if valid_session.staff:
-                    if submit_session_to_attendance_sheet(valid_session):
-                        summary = "✅ 已提交出勤紀錄\n\n"
-                        for person in valid_session.staff:
-                            days, remark = valid_session.calculate_attendance_days(person)
-                            summary += f"{person['name']}: {days} 天"
-                            if remark:
-                                summary += f" ({remark})"
-                            summary += "\n"
-                        reply_text = summary
-                    else:
-                        reply_text = "❌ 提交失敗"
-                else:
-                    reply_text = "❌ 無人員資料可提交"
+                reply_text = f"✅ 已記錄 {len(valid_session.staff)} 人的離場時間\n"
+                reply_text += "📊 出勤時數已寫入 Google Sheets\n"
+                reply_text += "🕙 每天 22:00 將自動統整每日出勤報告"
             else:
                 reply_text = "❌ 找不到有效的日報記錄"
 
@@ -398,28 +427,37 @@ def handle_message(event):
             print("📊 查詢本期出勤")
             if attendance_sheet:
                 try:
-                    start_date, end_date = get_current_period_dates()
-                    records = attendance_sheet.get_all_records()
-                    
-                    if records:
-                        df = pd.DataFrame(records)
-                        df['日期'] = pd.to_datetime(df['日期'].apply(minguo_to_gregorian), errors='coerce')
-                        
-                        period_df = df.dropna(subset=['日期'])
-                        period_df = period_df[
-                            (period_df['日期'] >= pd.to_datetime(start_date)) &
-                            (period_df['日期'] <= pd.to_datetime(end_date))
-                        ]
-
-                        if not period_df.empty:
-                            attendance_summary = period_df.groupby('姓名')['出勤時數'].sum().reset_index()
-                            reply_text = f"📅 本期 ({start_date.strftime('%Y/%m/%d')} ~ {end_date.strftime('%Y/%m/%d')}) 出勤時數統計：\n"
-                            for _, row in attendance_summary.iterrows():
-                                reply_text += f"• {row['姓名']}: {row['出勤時數']} 天\n"
-                        else:
-                            reply_text = "查詢範圍內無出勤紀錄"
+                    today = date.today()
+                    if today.day <= 5:
+                        start_date = (today.replace(day=1) - timedelta(days=1)).replace(day=21)
+                        end_date = today.replace(day=5)
+                    elif today.day <= 20:
+                        end_date = today.replace(day=20)
+                        start_date = today.replace(day=6)
                     else:
-                        reply_text = "試算表中沒有任何資料"
+                        start_date = today.replace(day=21)
+                        next_month = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+                        end_date = next_month.replace(day=5)
+                    
+                    records = attendance_sheet.get_all_records()
+                    df = pd.DataFrame(records)
+                    
+                    df['日期'] = pd.to_datetime(df['日期'].apply(minguo_to_gregorian), errors='coerce')
+                    
+                    period_df = df.dropna(subset=['日期'])
+                    period_df = period_df[
+                        (period_df['日期'] >= pd.to_datetime(start_date)) &
+                        (period_df['日期'] <= pd.to_datetime(end_date))
+                    ]
+
+                    if not period_df.empty:
+                        period_df['出勤時數'] = pd.to_numeric(period_df['出勤時數'], errors='coerce')
+                        attendance_summary = period_df.groupby('姓名')['出勤時數'].sum().reset_index()
+                        reply_text = f"📅 本期 ({start_date.strftime('%Y/%m/%d')} ~ {end_date.strftime('%Y/%m/%d')}) 出勤時數統計：\n"
+                        for _, row in attendance_summary.iterrows():
+                            reply_text += f"• {row['姓名']}: {row['出勤時數']} 天\n"
+                    else:
+                        reply_text = "查詢範圍內無出勤紀錄"
                 except Exception as e:
                     reply_text = f"❌ 查詢失敗: {str(e)}"
             else:
