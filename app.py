@@ -344,53 +344,54 @@ def handle_message(event):
         # --- 新增人員 ---
         elif "新增" in message_text:
             print("➕ 檢測到新增人員")
-            date_match = re.search(r"(\d{3}/\d{2}/\d{2})", message_text)
-            work_date = date_match.group(1) if date_match else None
-            
-            if not work_date:
-                today = date.today()
-                minguo_year = today.year - 1911
-                work_date = f"{minguo_year:03d}/{today.month:02d}/{today.day:02d}"
-            
-            session = get_or_create_session(user_id, work_date)
             staff_info = parse_add_staff(message_text)
             
-            if staff_info and session.project_name:
-                if session.add_staff(staff_info['name'], staff_info['note'], add_time=message_time):
-                    reply_text = f"✅ 已新增 {staff_info['name']} (時間: {message_time.strftime('%H:%M')})\n\n" + session.get_summary()
-                else:
-                    reply_text = f"⚠️ {staff_info['name']} 已在清單中"
+            if not staff_info:
+                reply_text = "❌ 新增格式錯誤，請用 '新增：名字' 或 '新增：名字 (備註)'"
             else:
-                reply_text = "❌ 請先提交完整日報或格式錯誤"
+                # [修正] 先找有效的 Session（最後一個有日報的 Session）
+                valid_session = None
+                for session_key, session in session_states.items():
+                    if session.user_id == user_id and session.project_name:
+                        valid_session = session
+                
+                if valid_session:
+                    if valid_session.add_staff(staff_info['name'], staff_info['note'], add_time=message_time):
+                        reply_text = f"✅ 已新增 {staff_info['name']} (時間: {message_time.strftime('%H:%M')})\n\n" + valid_session.get_summary()
+                    else:
+                        reply_text = f"⚠️ {staff_info['name']} 已在清單中"
+                else:
+                    reply_text = "❌ 請先提交完整日報"
 
         # --- 人員離場/記錄結束 ---
         elif "人員離場" in message_text or "人員下班" in message_text:
             print("⬜ 檢測到記錄結束")
-            date_match = re.search(r"(\d{3}/\d{2}/\d{2})", message_text)
-            work_date = date_match.group(1) if date_match else None
             
-            if not work_date:
-                today = date.today()
-                minguo_year = today.year - 1911
-                work_date = f"{minguo_year:03d}/{today.month:02d}/{today.day:02d}"
+            # [修正] 先找有效的 Session
+            valid_session = None
+            for session_key, session in session_states.items():
+                if session.user_id == user_id and session.project_name and not session.submitted:
+                    valid_session = session
             
-            session = get_or_create_session(user_id, work_date)
-            session.set_end_time(message_time)
-            
-            if session.staff and not session.submitted:
-                if submit_session_to_attendance_sheet(session):
-                    summary = "✅ 已提交出勤紀錄\n\n"
-                    for person in session.staff:
-                        days, remark = session.calculate_attendance_days(person)
-                        summary += f"{person['name']}: {days} 天"
-                        if remark:
-                            summary += f" ({remark})"
-                        summary += "\n"
-                    reply_text = summary
+            if valid_session:
+                valid_session.set_end_time(message_time)
+                
+                if valid_session.staff:
+                    if submit_session_to_attendance_sheet(valid_session):
+                        summary = "✅ 已提交出勤紀錄\n\n"
+                        for person in valid_session.staff:
+                            days, remark = valid_session.calculate_attendance_days(person)
+                            summary += f"{person['name']}: {days} 天"
+                            if remark:
+                                summary += f" ({remark})"
+                            summary += "\n"
+                        reply_text = summary
+                    else:
+                        reply_text = "❌ 提交失敗"
                 else:
-                    reply_text = "❌ 提交失敗"
+                    reply_text = "❌ 無人員資料可提交"
             else:
-                reply_text = "❌ 無資料可提交或已提交過"
+                reply_text = "❌ 找不到有效的日報記錄"
 
         # --- 查詢本期出勤 ---
         elif message_text == "查詢本期出勤":
