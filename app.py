@@ -22,16 +22,17 @@ YOUR_CHANNEL_ACCESS_TOKEN = os.environ.get('YOUR_CHANNEL_ACCESS_TOKEN')
 YOUR_CHANNEL_SECRET = os.environ.get('YOUR_CHANNEL_SECRET')
 GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
 
-ALLOWED_USER_IDS = ["U724ac19c55418145a5af5aa1af558cbb"]  # ⚠️ 改成你的真實 ID
+ALLOWED_USER_IDS = ["U724ac19c55418145a5af5aa1af558cbb"]
 GOOGLE_SHEET_NAME = "我的工務助理資料庫"
 WORKSHEET_NAME = "出勤總表"
 
 line_bot_api = LineBotApi(YOUR_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(YOUR_CHANNEL_SECRET)
 
-# [新增] 防重複機制：記錄已處理過的訊息
+# [新增] 防重複 + 對話狀態管理
 processed_messages = {}
-DUPLICATE_CHECK_WINDOW = 300  # 5 分鐘內檢查重複
+DUPLICATE_CHECK_WINDOW = 300
+session_states = {}  # 儲存每個用戶的對話狀態
 
 try:
     creds_json = json.loads(GOOGLE_SHEETS_CREDENTIALS_JSON)
@@ -44,55 +45,88 @@ except Exception as e:
     print(f"❌ Google Sheets 連線失敗: {e}")
     worksheet = None
 
-# --- [新增] Keep-Alive 機制 ---
+# --- Keep-Alive 機制 ---
 def keep_alive():
-    """定期 ping 自己以防止服務休眠"""
     while True:
         try:
-            time.sleep(840)  # 每 14 分鐘 ping 一次
+            time.sleep(840)
             import urllib.request
             render_url = os.environ.get('RENDER_URL', 'https://my-bot-project-1.onrender.com')
             try:
                 urllib.request.urlopen(f"{render_url}/health", timeout=5)
                 print("[KEEPALIVE] ✅ 防止休眠")
             except:
-                print("[KEEPALIVE] ⚠️ Ping 失敗，但繼續運行")
+                print("[KEEPALIVE] ⚠️ Ping 失敗")
         except Exception as e:
             print(f"[KEEPALIVE] ❌ {e}")
 
-# 啟動 Keep-Alive 執行緒
 keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
 keep_alive_thread.start()
 
-# --- [新增] 健康檢查端點 ---
 @app.route("/health", methods=['GET'])
 def health_check():
     return 'OK', 200
 
-# --- [新增] 防重複檢查函式 ---
+# --- 防重複檢查 ---
 def is_duplicate_message(user_id, message_text, timestamp):
-    """檢查是否為重複訊息"""
-    # 建立訊息的唯一識別碼
     msg_hash = hashlib.md5(f"{user_id}{message_text}{timestamp}".encode()).hexdigest()
-    
-    # 清理過期的記錄
     current_time = time.time()
     to_delete = [k for k, v in processed_messages.items() if current_time - v > DUPLICATE_CHECK_WINDOW]
     for k in to_delete:
         del processed_messages[k]
-    
-    # 檢查是否已處理過
     if msg_hash in processed_messages:
-        print(f"[重複偵測] ⚠️ 檢測到重複訊息: {msg_hash}")
         return True
-    
-    # 記錄此訊息
     processed_messages[msg_hash] = current_time
     return False
 
+# --- [新增] 對話狀態管理 ---
+class DailySession:
+    """管理一天的出勤對話狀態"""
+    def __init__(self, user_id, work_date):
+        self.user_id = user_id
+        self.work_date = work_date
+        self.project_name = None
+        self.staff = []  # 當前人員清單
+        self.head_count = 0
+        self.lunch_count = 0
+        self.submitted = False
+        self.created_time = datetime.datetime.now()
+    
+    def add_staff(self, name, note=None):
+        """增加人員"""
+        if name not in [s['name'] for s in self.staff]:
+            self.staff.append({"name": name, "note": note})
+            self.head_count += 1
+            return True
+        return False
+    
+    def remove_staff(self, name):
+        """移除人員"""
+        self.staff = [s for s in self.staff if s['name'] != name]
+        self.head_count = len(self.staff)
+        return True
+    
+    def get_summary(self):
+        """取得當前摘要"""
+        summary = f"📋 {self.work_date} - {self.project_name}\n"
+        summary += f"👥 目前人數: {self.head_count} 人\n"
+        summary += f"🍱 便當: {self.lunch_count} 個\n"
+        summary += "人員:\n"
+        for i, person in enumerate(self.staff, 1):
+            note_str = f" ({person['note']})" if person['note'] else ""
+            summary += f"  {i}. {person['name']}{note_str}\n"
+        return summary
+
+def get_or_create_session(user_id, work_date):
+    """取得或建立該日期的對話狀態"""
+    session_key = f"{user_id}_{work_date}"
+    if session_key not in session_states:
+        session_states[session_key] = DailySession(user_id, work_date)
+    return session_states[session_key]
+
 # --- 核心解析函式 ---
-def parse_attendance_report(text):
-    """解析出勤日報"""
+def parse_full_attendance_report(text):
+    """解析完整的出勤日報"""
     try:
         pattern = re.compile(
             r"^(?P<date>\d{3}/\d{2}/\d{2})\n"
@@ -123,20 +157,67 @@ def parse_attendance_report(text):
             else:
                 staff_list.append({"name": clean_line, "note": None})
         
-        result = {
+        return {
             "date": data["date"],
             "project_name": data["project_name"].strip(),
             "head_count": int(data["head_count"]),
             "lunch_box_count": int(data["lunch_box_count"]),
             "staff": staff_list
         }
-        return result
     except Exception as e:
         print(f"❌ 解析日報錯誤: {e}")
         return None
 
+def parse_add_staff(text):
+    """解析新增人員訊息 '新增：名字' 或 '新增: 名字 (備註)'"""
+    match = re.search(r"新增[:：]\s*(.+?)(?:\s*\((.+)\))?$", text.strip())
+    if match:
+        name = match.group(1).strip()
+        note = match.group(2).strip() if match.group(2) else None
+        return {"name": name, "note": note}
+    return None
+
+def parse_remove_staff(text):
+    """解析移除人員訊息 '人員離場' 或 '移除：名字'"""
+    if "人員離場" in text or "人員下班" in text:
+        return "all"  # 表示記錄結束
+    match = re.search(r"移除[:：]\s*(.+?)$", text.strip())
+    if match:
+        return match.group(1).strip()
+    return None
+
+def submit_session_to_sheet(session):
+    """將對話狀態中的資料提交到 Google Sheets"""
+    if not worksheet or not session.staff:
+        return False
+    
+    try:
+        now_str = datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=8))
+        ).strftime('%Y-%m-%d %H:%M:%S')
+        
+        rows_added = 0
+        for person in session.staff:
+            new_row = [
+                now_str,
+                session.work_date,
+                session.project_name,
+                person['name'],
+                person['note'] or "",
+                session.head_count,
+                session.lunch_count
+            ]
+            worksheet.append_row(new_row)
+            rows_added += 1
+        
+        session.submitted = True
+        print(f"✅ 成功提交 {rows_added} 筆資料")
+        return True
+    except Exception as e:
+        print(f"❌ 提交錯誤: {e}")
+        return False
+
 def get_current_period_dates():
-    """計算當前統計期間"""
     today = date.today()
     if 6 <= today.day <= 20:
         start_date = today.replace(day=6)
@@ -154,7 +235,6 @@ def get_current_period_dates():
     return start_date, end_date
 
 def minguo_to_gregorian(minguo_str):
-    """民國年轉西元年"""
     try:
         parts = minguo_str.split('/')
         minguo_year, month, day = [int(p) for p in parts]
@@ -163,7 +243,7 @@ def minguo_to_gregorian(minguo_str):
     except (ValueError, TypeError):
         return None
 
-# --- LINE Webhook 主要進入點 ---
+# --- LINE Webhook ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -171,69 +251,92 @@ def callback():
     
     try:
         handler.handle(body, signature)
-        return 'OK', 200  # ✅ 立即回覆 200，告訴 LINE 已收到
+        return 'OK', 200
     except InvalidSignatureError:
-        print("❌ 簽名驗證失敗")
         return 'Invalid signature', 403
     except Exception as e:
-        print(f"❌ Callback 處理錯誤: {e}")
+        print(f"❌ Callback 錯誤: {e}")
         return 'Internal Server Error', 500
 
-# --- 訊息處理總管 ---
+# --- 訊息處理 ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     try:
         user_id = event.source.user_id
         message_text = event.message.text.strip()
-        timestamp = event.timestamp / 1000  # LINE 的時間戳是毫秒
+        timestamp = event.timestamp / 1000
         
         print(f"\n[新訊息] User: {user_id}, Text: {message_text}")
         
-        # [防重複檢查]
         if is_duplicate_message(user_id, message_text, timestamp):
-            print("⚠️ 已跳過重複訊息")
             return
         
-        # [白名單檢查]
         if user_id not in ALLOWED_USER_IDS:
-            print(f"❌ User {user_id} 未在白名單")
             return
 
         reply_text = "無法識別的指令或格式錯誤。"
 
-        # --- 日報提交 ---
+        # --- 完整日報提交 ---
         if "出工人員：" in message_text:
-            print("📝 檢測到日報格式")
-            report_data = parse_attendance_report(message_text)
+            print("📝 檢測到完整日報")
+            report_data = parse_full_attendance_report(message_text)
             
-            if report_data and worksheet:
-                try:
-                    now_str = datetime.datetime.now(
-                        datetime.timezone(datetime.timedelta(hours=8))
-                    ).strftime('%Y-%m-%d %H:%M:%S')
-                    
-                    rows_added = 0
-                    for person in report_data['staff']:
-                        new_row = [
-                            now_str,
-                            report_data['date'],
-                            report_data['project_name'],
-                            person['name'],
-                            person['note'] or "",
-                            report_data['head_count'],
-                            report_data['lunch_box_count']
-                        ]
-                        worksheet.append_row(new_row)
-                        rows_added += 1
-                    
-                    reply_text = f"✅ 已成功新增 {rows_added} 筆資料\n日期: {report_data['date']}\n"
-                    print(f"✅ 成功新增 {rows_added} 筆日報資料")
-                    
-                except Exception as e:
-                    reply_text = f"❌ 寫入 Google Sheets 失敗: {str(e)}"
-                    print(f"❌ 寫入錯誤: {e}")
+            if report_data:
+                session = get_or_create_session(user_id, report_data['date'])
+                session.project_name = report_data['project_name']
+                session.head_count = report_data['head_count']
+                session.lunch_count = report_data['lunch_box_count']
+                session.staff = report_data['staff']
+                
+                reply_text = session.get_summary()
+                reply_text += "\n✅ 已記錄初始日報\n提示: 發送 '新增：名字' 或 '人員離場' 來更新"
             else:
-                reply_text = "❌ 日報格式錯誤或 Google Sheets 連線失敗"
+                reply_text = "❌ 日報格式錯誤"
+
+        # --- 新增人員 ---
+        elif "新增" in message_text:
+            print("➕ 檢測到新增人員")
+            # 嘗試從訊息中提取日期（如果有）
+            date_match = re.search(r"(\d{3}/\d{2}/\d{2})", message_text)
+            work_date = date_match.group(1) if date_match else None
+            
+            if not work_date:
+                today = date.today()
+                minguo_year = today.year - 1911
+                work_date = f"{minguo_year:03d}/{today.month:02d}/{today.day:02d}"
+            
+            session = get_or_create_session(user_id, work_date)
+            staff_info = parse_add_staff(message_text)
+            
+            if staff_info and session.project_name:
+                if session.add_staff(staff_info['name'], staff_info['note']):
+                    session.lunch_count += 1
+                    reply_text = f"✅ 已新增 {staff_info['name']}\n\n" + session.get_summary()
+                else:
+                    reply_text = f"⚠️ {staff_info['name']} 已在清單中"
+            else:
+                reply_text = "❌ 請先提交完整日報或格式錯誤"
+
+        # --- 人員離場/記錄結束 ---
+        elif "人員離場" in message_text or "人員下班" in message_text:
+            print("⬜ 檢測到記錄結束")
+            date_match = re.search(r"(\d{3}/\d{2}/\d{2})", message_text)
+            work_date = date_match.group(1) if date_match else None
+            
+            if not work_date:
+                today = date.today()
+                minguo_year = today.year - 1911
+                work_date = f"{minguo_year:03d}/{today.month:02d}/{today.day:02d}"
+            
+            session = get_or_create_session(user_id, work_date)
+            
+            if session.staff and not session.submitted:
+                if submit_session_to_sheet(session):
+                    reply_text = f"✅ 已提交 {len(session.staff)} 人的出勤紀錄至 Google Sheets"
+                else:
+                    reply_text = "❌ 提交失敗"
+            else:
+                reply_text = "❌ 無資料可提交或已提交過"
 
         # --- 查詢本期出勤 ---
         elif message_text == "查詢本期出勤":
@@ -243,9 +346,7 @@ def handle_message(event):
                     start_date, end_date = get_current_period_dates()
                     records = worksheet.get_all_records()
                     
-                    if not records:
-                        reply_text = "試算表中沒有任何資料可供統計。"
-                    else:
+                    if records:
                         df = pd.DataFrame(records)
                         df['gregorian_date'] = pd.to_datetime(
                             df['日期'].apply(minguo_to_gregorian),
@@ -264,22 +365,20 @@ def handle_message(event):
                             for _, row in attendance_count.iterrows():
                                 reply_text += f"• {row['姓名']}: {row['天數']} 天\n"
                         else:
-                            reply_text = f"查詢範圍 {start_date.strftime('%Y/%m/%d')} ~ {end_date.strftime('%Y/%m/%d')} 內無出勤紀錄"
+                            reply_text = f"查詢範圍內無出勤紀錄"
+                    else:
+                        reply_text = "試算表中沒有任何資料"
                 except Exception as e:
                     reply_text = f"❌ 查詢失敗: {str(e)}"
-                    print(f"❌ 查詢錯誤: {e}")
             else:
                 reply_text = "❌ Google Sheets 連線失敗"
         
-        # 發送回覆
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-        print(f"✅ 已回覆: {reply_text[:50]}...")
         
     except Exception as e:
-        print(f"❌ 處理訊息時發生未預期的錯誤: {e}")
+        print(f"❌ 處理錯誤: {e}")
 
-# --- 啟動伺服器 ---
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
-    print(f"🚀 啟動 Flask 伺服器，監聽 port {port}")
+    print(f"🚀 啟動伺服器 port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
