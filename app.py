@@ -277,12 +277,14 @@ class DailySession:
             summary += f"  {i}. {person['name']}\n"
         return summary
 
-def get_or_create_session(user_id, work_date, project_name):
+def get_or_create_session(user_id, work_date, project_name=None):
     """取得或建立該日期和專案的對話狀態"""
+    if project_name is None:
+        project_name = ""
     # 改用 (user_id, work_date, project_name) 作為 key，支持同一天多專案
     session_key = f"{user_id}_{work_date}_{project_name}"
     if session_key not in session_states:
-        session_states[session_key] = DailySession(user_id, work_date)
+        session_states[session_key] = DailySession(user_id, work_date, project_name)
     return session_states[session_key]
 
 def parse_full_attendance_report(text):
