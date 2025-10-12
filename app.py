@@ -81,7 +81,7 @@ def keep_alive():
                 urllib.request.urlopen(f"{render_url}/health", timeout=5)
                 print("[KEEPALIVE] ✅ 防止休眠")
             except:
-                print("[KEEPALIVE]⚠️ Ping 失敗")
+                print("[KEEPALIVE] ⚠️ Ping 失敗")
         except Exception as e:
             print(f"[KEEPALIVE] ❌ {e}")
 
@@ -178,7 +178,7 @@ def update_person_checkout(work_date, person_name, checkout_time, sign_in_time):
 
 # --- 每日統整函式 ---
 def daily_summary():
-    """每天 22:00 執行統整"""
+    """每天 22:00 執行統整 - 同一天同一人只計一次"""
     print("\n" + "="*50)
     print("🕙 22:00 每日統整開始")
     print("="*50)
@@ -202,20 +202,37 @@ def daily_summary():
             print(f"ℹ️ {today_str} 沒有出勤記錄")
             return
         
-        # 按姓名分組，計算總出勤天數
-        summary_by_name = today_df.groupby('姓名')['出勤時數'].sum().reset_index()
-        summary_by_name.columns = ['姓名', '總出勤天數']
+        # 關鍵改進：同一天同一人只計算最高的出勤時數
+        # 例如在兩個專案都簽到，選擇較高的時數
+        summary_list = []
+        for person_name in today_df['姓名'].unique():
+            person_records = today_df[today_df['姓名'] == person_name]
+            
+            # 取得該人員該天所有的出勤時數
+            days_list = pd.to_numeric(person_records['出勤時數'], errors='coerce').dropna().tolist()
+            
+            if days_list:
+                # 取最高的出勤時數（如果多次簽到，取較多的）
+                max_days = max(days_list)
+                summary_list.append({'姓名': person_name, '總出勤天數': max_days})
+        
+        if not summary_list:
+            print(f"ℹ️ {today_str} 沒有有效的出勤時數")
+            return
+        
+        summary_df = pd.DataFrame(summary_list)
         
         # 寫入統整表
         update_time = datetime.datetime.now(
             datetime.timezone(datetime.timedelta(hours=8))
         ).strftime('%Y-%m-%d %H:%M:%S')
         
-        for _, row in summary_by_name.iterrows():
+        for _, row in summary_df.iterrows():
             summary_row = [today_str, row['姓名'], row['總出勤天數'], update_time]
             summary_sheet.append_row(summary_row)
         
-        print(f"✅ 已統整 {len(summary_by_name)} 人的 {today_str} 出勤資料")
+        print(f"✅ 已統整 {len(summary_df)} 人的 {today_str} 出勤資料")
+        print(f"統整內容: {summary_df.to_string()}")
         
     except Exception as e:
         print(f"❌ 統整失敗: {e}")
