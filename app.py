@@ -250,10 +250,10 @@ start_scheduler()
 
 # --- 對話狀態管理 ---
 class DailySession:
-    def __init__(self, user_id, work_date):
+    def __init__(self, user_id, work_date, project_name=""):
         self.user_id = user_id
         self.work_date = work_date
-        self.project_name = None
+        self.project_name = project_name
         self.staff = []
         self.created_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
     
