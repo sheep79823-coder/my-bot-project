@@ -81,7 +81,7 @@ def keep_alive():
                 urllib.request.urlopen(f"{render_url}/health", timeout=5)
                 print("[KEEPALIVE] ✅ 防止休眠")
             except:
-                print("[KEEPALIVE] ⚠️ Ping 失敗")
+                print("[KEEPALIVE]⚠️ Ping 失敗")
         except Exception as e:
             print(f"[KEEPALIVE] ❌ {e}")
 
@@ -120,7 +120,7 @@ def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, no
             sign_in_time.strftime('%H:%M') if sign_in_time else "",
             "",  # 離場時間（先空著）
             "",  # 出勤時數（先空著）
-            note,
+            note if note else f"項目: {project_name}",
             update_time
         ]
         attendance_sheet.append_row(new_row)
@@ -130,24 +130,45 @@ def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, no
         print(f"❌ 寫入失敗: {e}")
         return False
 
-def update_person_checkout(work_date, person_name, checkout_time, days, remark=""):
+def update_person_checkout(work_date, person_name, checkout_time, sign_in_time):
     """更新一個人的離場時間和出勤天數"""
     if not attendance_sheet:
         return False
     
     try:
-        # 取得所有記錄
         records = attendance_sheet.get_all_records()
         
-        # 找到對應的記錄
-        for i, record in enumerate(records, start=2):  # 從第2行開始（跳過標題）
+        # 找到同一天該人員最後一條未完成的記錄（支持同天多專案）
+        target_row = None
+        for i, record in enumerate(records, start=2):
             if record['日期'] == work_date and record['姓名'] == person_name and not record['離場時間']:
-                # 更新這一行
-                attendance_sheet.update_cell(i, 4, checkout_time.strftime('%H:%M'))  # D列 離場時間
-                attendance_sheet.update_cell(i, 5, days)  # E列 出勤時數
-                attendance_sheet.update_cell(i, 6, remark)  # F列 備註
-                print(f"✅ 已更新 {person_name} 的離場時間和出勤天數")
-                return True
+                target_row = i  # 只更新最後一條未完成的記錄
+        
+        if target_row:
+            checkout_hour = checkout_time.hour
+            sign_in_hour = sign_in_time.hour
+            
+            # 計算出勤天數
+            if sign_in_hour < 10:
+                days = 1.0
+                remark = ""
+            elif sign_in_hour < 13:
+                days = 1.0
+                remark = ""
+            else:
+                days = 0.5
+                remark = "下午簽到"
+            
+            # 加班判定（17:00 後離場）
+            if checkout_hour >= 17:
+                remark = (remark + " " if remark else "") + "加班"
+            
+            # 更新這一行
+            attendance_sheet.update_cell(target_row, 4, checkout_time.strftime('%H:%M'))  # D列 離場時間
+            attendance_sheet.update_cell(target_row, 5, days)  # E列 出勤時數
+            attendance_sheet.update_cell(target_row, 6, remark.strip())  # F列 備註
+            print(f"✅ 已更新 {person_name} 的離場時間和出勤天數")
+            return True
         
         print(f"⚠️ 找不到 {person_name} 的簽到記錄")
         return False
@@ -200,13 +221,13 @@ def daily_summary():
         print(f"❌ 統整失敗: {e}")
 
 # --- 排程設定 ---
-scheduler = BackgroundScheduler()
+scheduler = BackgroundScheduler(timezone='Asia/Taipei')
 
 def start_scheduler():
-    """啟動排程器"""
-    scheduler.add_job(daily_summary, 'cron', hour=22, minute=0)
+    """啟動排程器 - 每天 22:00 台灣時間執行"""
+    scheduler.add_job(daily_summary, 'cron', hour=22, minute=0, timezone='Asia/Taipei')
     scheduler.start()
-    print("✅ 已啟動每日 22:00 統整排程")
+    print("✅ 已啟動每日 22:00 (台灣時間) 統整排程")
 
 start_scheduler()
 
@@ -415,13 +436,11 @@ def handle_message(event):
             if valid_session:
                 # 更新所有人員的離場時間
                 for person in valid_session.staff:
-                    add_hour = person['add_time'].hour
-                    days, remark = calculate_attendance_days(add_hour)
-                    update_person_checkout(valid_session.work_date, person['name'], message_time, days, remark)
+                    update_person_checkout(valid_session.work_date, person['name'], message_time, person['add_time'])
                 
                 reply_text = f"✅ 已記錄 {len(valid_session.staff)} 人的離場時間\n"
                 reply_text += "📊 出勤時數已寫入 Google Sheets\n"
-                reply_text += "🕙 每天 22:00 將自動統整每日出勤報告"
+                reply_text += "🕙 每天 22:00 (台灣時間) 將自動統整每日出勤報告"
             else:
                 reply_text = "❌ 找不到有效的日報記錄"
 
