@@ -277,8 +277,10 @@ class DailySession:
             summary += f"  {i}. {person['name']}\n"
         return summary
 
-def get_or_create_session(user_id, work_date):
-    session_key = f"{user_id}_{work_date}"
+def get_or_create_session(user_id, work_date, project_name):
+    """取得或建立該日期和專案的對話狀態"""
+    # 改用 (user_id, work_date, project_name) 作為 key，支持同一天多專案
+    session_key = f"{user_id}_{work_date}_{project_name}"
     if session_key not in session_states:
         session_states[session_key] = DailySession(user_id, work_date)
     return session_states[session_key]
@@ -423,10 +425,14 @@ def handle_message(event):
         elif "新增" in message_text:
             print("➕ 檢測到新增人員")
             
+            # 找到該用戶最後一個有效的 Session（最近建立的）
             valid_session = None
+            latest_time = None
             for session_key, session in session_states.items():
                 if session.user_id == user_id and session.project_name:
-                    valid_session = session
+                    if latest_time is None or session.created_time > latest_time:
+                        valid_session = session
+                        latest_time = session.created_time
             
             if valid_session:
                 staff_info = parse_add_staff(message_text)
@@ -445,10 +451,14 @@ def handle_message(event):
         elif "人員離場" in message_text or "人員下班" in message_text:
             print("⬜ 檢測到記錄結束")
             
+            # 找到該用戶最後一個有效的 Session
             valid_session = None
+            latest_time = None
             for session_key, session in session_states.items():
                 if session.user_id == user_id and session.project_name:
-                    valid_session = session
+                    if latest_time is None or session.created_time > latest_time:
+                        valid_session = session
+                        latest_time = session.created_time
             
             if valid_session:
                 # 更新所有人員的離場時間
@@ -456,6 +466,7 @@ def handle_message(event):
                     update_person_checkout(valid_session.work_date, person['name'], message_time, person['add_time'])
                 
                 reply_text = f"✅ 已記錄 {len(valid_session.staff)} 人的離場時間\n"
+                reply_text += f"專案: {valid_session.project_name}\n"
                 reply_text += "📊 出勤時數已寫入 Google Sheets\n"
                 reply_text += "🕙 每天 22:00 (台灣時間) 將自動統整每日出勤報告"
             else:
