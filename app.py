@@ -395,6 +395,11 @@ def handle_message(event):
         
         print(f"\n[新訊息] User: {user_id}, Text: {message_text}, Time: {message_time.strftime('%H:%M')}")
         
+        # [1. 群組過濾] 只有私人對話才處理，群組消息忽略
+        if event.source.type == 'group':
+            print(f"[過濾] 群組消息已忽略")
+            return
+        
         if is_duplicate_message(user_id, message_text, timestamp):
             return
         
