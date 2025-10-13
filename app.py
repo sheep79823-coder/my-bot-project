@@ -371,6 +371,52 @@ def minguo_to_gregorian(minguo_str):
     except (ValueError, TypeError):
         return None
 
+# --- [新增] 單獨離場人員的解析函式 ---
+def parse_checkout_staff(text):
+    """解析 '離場:姓名' 或 '下班:姓名' 的指令"""
+    match = re.search(r"(?:離場|下班)[:：]\s*(.+)$", text.strip())
+    if match:
+        name = match.group(1).strip()
+        return {"name": name}
+    return None
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers['X-Line-Signature']
+    body = request.get_data(as_text=True)
+    
+    try:
+        handler.handle(body, signature)
+        return 'OK', 200
+    except InvalidSignatureError:
+        return 'Invalid signature', 403
+    except Exception as e:
+        print(f"❌ Callback 錯誤: {e}")
+        return 'Internal Server Error', 500
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    try:
+        user_id = event.source.user_id
+        message_text = event.message.text.strip()
+        timestamp = event.timestamp / 1000
+        message_time = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone(datetime.timedelta(hours=8)))
+        
+        print(f"\n[新訊息] User: {user_id}, Text: {message_text}, Time: {message_time.strftime('%H:%M')}")
+        
+        if event.source.type == 'group':
+            print(f"[過濾] 群組消息已忽略")
+            return
+        
+        if is_duplicate_message(user_id, message_text, timestamp):
+            return
+        
+        if user_id not in ALLOWED_USER_IDS:
+            return
+
+        reply_text = "無法識別的指令或格式錯誤。"
+
+
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -432,7 +478,6 @@ def handle_message(event):
         elif "新增" in message_text:
             print("➕ 檢測到新增人員")
             
-            # 找到該用戶最後一個有效的 Session（最近建立的）
             valid_session = None
             latest_time = None
             for session_key, session in session_states.items():
@@ -454,11 +499,10 @@ def handle_message(event):
             else:
                 reply_text = "❌ 請先提交完整日報"
 
-        # --- 人員離場/記錄結束 ---
-        elif "人員離場" in message_text or "人員下班" in message_text:
-            print("⬜ 檢測到記錄結束")
+ # --- [新增] 單獨人員離場 ---
+        elif "離場:" in message_text or "下班:" in message_text:
+            print("🚶 檢測到單獨人員離場")
             
-            # 找到該用戶最後一個有效的 Session
             valid_session = None
             latest_time = None
             for session_key, session in session_states.items():
@@ -468,11 +512,45 @@ def handle_message(event):
                         latest_time = session.created_time
             
             if valid_session:
-                # 更新所有人員的離場時間
+                checkout_info = parse_checkout_staff(message_text)
+                if checkout_info:
+                    person_name = checkout_info['name']
+                    
+                    person_data = next((p for p in valid_session.staff if p['name'] == person_name), None)
+                    
+                    if person_data:
+                        sign_in_time = person_data['add_time']
+                        if update_person_checkout(valid_session.work_date, person_name, message_time, sign_in_time):
+                            reply_text = f"✅ 已記錄 {person_name} 的離場時間 ({message_time.strftime('%H:%M')})\n"
+                            reply_text += "📊 出勤時數已更新至 Google Sheets"
+                        else:
+                            reply_text = f"⚠️ 更新 {person_name} 的離場記錄失敗，可能已記錄過或找不到簽到資料。"
+                    else:
+                        reply_text = f"❌ 找不到 {person_name} 的簽到記錄，請確認姓名是否正確。"
+                else:
+                    reply_text = "❌ 離場格式錯誤，請用 '離場:姓名'"
+            else:
+                reply_text = "❌ 請先提交完整日報"
+
+        # --- [修改] 通用人員離場 (放在單獨離場之後) ---
+        elif "人員離場" in message_text or "人員下班" in message_text:
+            print("⬜ 檢測到記錄結束")
+            
+            valid_session = None
+            latest_time = None
+            for session_key, session in session_states.items():
+                if session.user_id == user_id and session.project_name:
+                    if latest_time is None or session.created_time > latest_time:
+                        valid_session = session
+                        latest_time = session.created_time
+            
+            if valid_session:
+                updated_count = 0
                 for person in valid_session.staff:
-                    update_person_checkout(valid_session.work_date, person['name'], message_time, person['add_time'])
+                    if update_person_checkout(valid_session.work_date, person['name'], message_time, person['add_time']):
+                        updated_count += 1
                 
-                reply_text = f"✅ 已記錄 {len(valid_session.staff)} 人的離場時間\n"
+                reply_text = f"✅ 已記錄 {updated_count} 人的離場時間\n"
                 reply_text += f"專案: {valid_session.project_name}\n"
                 reply_text += "📊 出勤時數已寫入 Google Sheets\n"
                 reply_text += "🕙 每天 22:00 (台灣時間) 將自動統整每日出勤報告"
