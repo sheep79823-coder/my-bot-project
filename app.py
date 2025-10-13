@@ -454,7 +454,7 @@ def handle_message(event):
 
         reply_text = "無法識別的指令或格式錯誤。"
 
-        # --- 完整日報提交 ---
+       # --- 完整日報提交 ---
         if re.search(r"\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
             print("📝 檢測到完整日報")
             report_data = parse_full_attendance_report(message_text)
@@ -463,7 +463,6 @@ def handle_message(event):
                 session = get_or_create_session(user_id, report_data['date'])
                 session.project_name = report_data['project_name']
                 
-                # 立即寫入所有人員到 Google Sheets
                 for staff in report_data['staff']:
                     session.add_staff_and_write(staff['name'], staff['note'], message_time)
                 
@@ -499,7 +498,7 @@ def handle_message(event):
             else:
                 reply_text = "❌ 請先提交完整日報"
 
- # --- [新增] 單獨人員離場 ---
+        # --- 單獨人員離場 ---
         elif "離場:" in message_text or "下班:" in message_text:
             print("🚶 檢測到單獨人員離場")
             
@@ -532,7 +531,7 @@ def handle_message(event):
             else:
                 reply_text = "❌ 請先提交完整日報"
 
-        # --- [修改] 通用人員離場 (放在單獨離場之後) ---
+        # --- 通用人員離場 ---
         elif "人員離場" in message_text or "人員下班" in message_text:
             print("⬜ 檢測到記錄結束")
             
