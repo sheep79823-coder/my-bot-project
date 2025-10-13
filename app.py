@@ -394,29 +394,6 @@ def callback():
         print(f"❌ Callback 錯誤: {e}")
         return 'Internal Server Error', 500
 
-@handler.add(MessageEvent, message=TextMessage)
-def handle_message(event):
-    try:
-        user_id = event.source.user_id
-        message_text = event.message.text.strip()
-        timestamp = event.timestamp / 1000
-        message_time = datetime.datetime.fromtimestamp(timestamp, tz=datetime.timezone(datetime.timedelta(hours=8)))
-        
-        print(f"\n[新訊息] User: {user_id}, Text: {message_text}, Time: {message_time.strftime('%H:%M')}")
-        
-        if event.source.type == 'group':
-            print(f"[過濾] 群組消息已忽略")
-            return
-        
-        if is_duplicate_message(user_id, message_text, timestamp):
-            return
-        
-        if user_id not in ALLOWED_USER_IDS:
-            return
-
-        reply_text = "無法識別的指令或格式錯誤。"
-
-
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
