@@ -374,7 +374,7 @@ def minguo_to_gregorian(minguo_str):
 # --- [新增] 單獨離場人員的解析函式 ---
 def parse_checkout_staff(text):
     """解析 '離場:姓名' 或 '下班:姓名' 的指令"""
-    match = re.search(r"(?:離場|下班)[:：]\s*(.+)$", text.strip())
+    match = re.search(r"(?:離場|下班)[:：]\s*(.+?)(?:\s*\((.+)\))?$"", text.strip())
     if match:
         name = match.group(1).strip()
         return {"name": name}
@@ -404,18 +404,7 @@ def handle_message(event):
         
         print(f"\n[新訊息] User: {user_id}, Text: {message_text}, Time: {message_time.strftime('%H:%M')}")
         
-        # [1. 群組過濾] 只有私人對話才處理，群組消息忽略
-        if event.source.type == 'group':
-            print(f"[過濾] 群組消息已忽略")
-            return
-        
-        if is_duplicate_message(user_id, message_text, timestamp):
-            return
-        
-        if user_id not in ALLOWED_USER_IDS:
-            return
 
-        reply_text = "無法識別的指令或格式錯誤。"
 
        # --- 完整日報提交 ---
         if re.search(r"\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
@@ -490,7 +479,7 @@ def handle_message(event):
                     else:
                         reply_text = f"❌ 找不到 {person_name} 的簽到記錄，請確認姓名是否正確。"
                 else:
-                    reply_text = "❌ 離場格式錯誤，請用 '離場:姓名'"
+                    reply_text = "❌ 離場格式錯誤，請用 '離場：姓名'"
             else:
                 reply_text = "❌ 請先提交完整日報"
 
