@@ -374,7 +374,7 @@ def minguo_to_gregorian(minguo_str):
 # --- [新增] 單獨離場人員的解析函式 ---
 def parse_checkout_staff(text):
     """解析 '離場:姓名' 或 '下班:姓名' 的指令"""
-    match = re.search(r"(?:離場|下班)[:：]\s*(.+?)(?:\s*\((.+)\))?$"", text.strip())
+    match = re.search(r"(?:離場|下班)[:：]\s*(.+?)(?:\s*\((.+)\))?$", text.strip())
     if match:
         name = match.group(1).strip()
         return {"name": name}
