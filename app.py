@@ -356,9 +356,9 @@ def parse_add_staff(text):
 def calculate_attendance_days(add_hour):
     """根據簽到時間計算出勤天數"""
     if add_hour < 10:
-        return 1.0, ""
+        return 1.0, "扣一小時"
     elif add_hour < 13:
-        return 1.0, ""
+        return 0.5, ""
     else:
         return 0.5, "下午半天"
 
@@ -451,7 +451,7 @@ def handle_message(event):
                 reply_text = "❌ 請先提交完整日報"
 
         # --- 單獨人員離場 ---
-        elif "離場:" in message_text or "下班:" in message_text:
+        elif "離場" in message_text or "下班" in message_text:
             print("🚶 檢測到單獨人員離場")
             
             valid_session = None
