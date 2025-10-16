@@ -267,8 +267,8 @@ def update_person_checkout(work_date, person_name, checkout_time, sign_in_time):
             if checkout_hour < 16:
                 days = 0.5
                 remark = f"早退({checkout_time.strftime('%H:%M')})"
-            # 17:50 後加班
-            elif checkout_hour >= 17:50
+            # 17:00 後加班
+            elif checkout_hour >= 17:
                 remark = (remark + " " if remark else "") + "加班"
             
             attendance_sheet.update_cell(target_row, 4, checkout_time.strftime('%H:%M'))
@@ -497,11 +497,11 @@ def parse_add_staff(text):
 
 def parse_checkout_staff(text):
     """解析離場指令"""
-    match = re.search(r"離場[:：]\s*(.+?)@(.+?)$", text.strip())
+    match = re.search(r"(?：離場|下班)[:：]\s*(.+?)@(.+?)$", text.strip())
     if match:
         return {"name": match.group(1).strip(), "project": match.group(2).strip()}
     
-    match = re.search(r"離場[:：]\s*(.+?)$", text.strip())
+    match = re.search(r"(?：離場|下班)[:：]\s*(.+?)$", text.strip())
     if match:
         return {"name": match.group(1).strip(), "project": None}
     return None
@@ -544,8 +544,7 @@ def handle_message(event):
         user_role = get_user_role(user_id)
         if not user_role:
             return
-        
-               
+                
         # 完整日報
         if re.search(r"\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
             report_data = parse_full_attendance_report(message_text)
@@ -569,8 +568,8 @@ def handle_message(event):
                         reply_text = f"✅ 已新增 {staff_info['name']}"
         
         # 單筆離場
-        elif ("離場" in message_text or "離場" in message_text or 
-              "下班" in message_text or "下班" in message_text):
+        elif ("離場:" in message_text or "離場：" in message_text or 
+              "下班:" in message_text or "下班：" in message_text):
             checkout_info = parse_checkout_staff(message_text)
             if checkout_info:
                 valid_session = find_session_for_user(user_id, checkout_info.get('project'))
