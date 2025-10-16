@@ -382,9 +382,81 @@ class DailySession:
         return False
     
     def get_summary(self):
-        summary = f"📋 {self.work_date} - {self.project_name}\n"
-        summary += f"👥 目前人數: {len(self.staff)} 人"
+        summary = f"📋 {self.work_date}\n"
+        summary += f"👥 目前人數: {len(self.staff)} 人\n"
+        summary += "人員:\n"
+        for i, person in enumerate(self.staff, 1):
+            summary += f"  {i}. {person['name']}\n"
         return summary
+def get_or_create_session(user_id, work_date, project_name=None):
+    """取得或建立該日期和專案的對話狀態"""
+    if project_name is None:
+        project_name = ""
+    # 改用 (user_id, work_date, project_name) 作為 key，支持同一天多專案
+    session_key = f"{user_id}_{work_date}_{project_name}"
+    if session_key not in session_states:
+        session_states[session_key] = DailySession(user_id, work_date, project_name)
+    return session_states[session_key]
+
+def parse_full_attendance_report(text):
+    try:
+        lines = text.strip().split('\n')
+        if len(lines) < 2:
+            return None
+        
+        date_match = re.match(r"^(\d{3}/\d{2}/\d{2})", lines[0])
+        if not date_match:
+            return None
+        work_date = date_match.group(1)
+        
+        project_name = lines[1].strip()
+        if not project_name:
+            return None
+        
+        staff_start_idx = None
+        for i, line in enumerate(lines):
+            if "人員" in line or "出工" in line:
+                staff_start_idx = i + 1
+                break
+        
+        if staff_start_idx is None:
+            staff_start_idx = 2
+        
+        staff_list = []
+        
+        for i in range(staff_start_idx, len(lines)):
+            line = lines[i].strip()
+            
+            if not line:
+                continue
+            
+            if "共計" in line or "便當" in line or "總計" in line:
+                continue
+            
+            clean_line = re.sub(r"^\d+[\.\、]", "", line).strip()
+            
+            note_match = re.search(r"\((.+)\)", clean_line)
+            if note_match:
+                note = note_match.group(1)
+                name = clean_line[:note_match.start()].strip()
+                staff_list.append({"name": name, "note": note})
+            else:
+                if clean_line:
+                    staff_list.append({"name": clean_line, "note": None})
+        
+        if not staff_list:
+            return None
+        
+        return {
+            "date": work_date,
+            "project_name": project_name,
+            "staff": staff_list
+        }
+    except Exception as e:
+        print(f"❌ 解析日報錯誤: {e}")
+        return None
+
+
 
 def get_or_create_session(work_date, project_name, user_id):
     """取得或建立 Session - 線程安全"""
@@ -622,13 +694,13 @@ def handle_message(event):
             valid_session = find_session_for_user(user_id, project_name)
             
             if valid_session and valid_session.staff:
-                default_checkout_time = message_time.replace(hour=16, minute=50, second=0, microsecond=0)
+                default_checkout_time = message_time.replace(hour=17, minute=30, second=0, microsecond=0)
                 count = 0
                 for person in valid_session.staff:
                     if update_person_checkout(valid_session.work_date, person['name'], 
                                             default_checkout_time, person['add_time']):
                         count += 1
-                reply_text = f"✅ 已記錄 {count} 人離場 (預設 16:50)\n專案: {valid_session.project_name}"
+                reply_text = f"✅ 已記錄 {count} 人離場 (預設 17:30)\n專案: {valid_session.project_name}"
             elif project_name:
                 reply_text = f"❌ 找不到專案「{project_name}」"
             else:
