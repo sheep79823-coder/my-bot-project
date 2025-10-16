@@ -40,7 +40,7 @@ DAILY_SUMMARY_SHEET = "每日統整"
 # [優化] Session 管理設定
 MAX_SESSIONS = 100  # 最多保留 100 個 Session
 SESSION_EXPIRE_DAYS = 7  # Session 保留 7 天
-CLEANUP_INTERVAL_HOURS = 10  # 每 10 小時清理一次
+CLEANUP_INTERVAL_HOURS = 6  # 每 6 小時清理一次
 
 line_bot_api = LineBotApi(YOUR_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(YOUR_CHANNEL_SECRET)
@@ -497,11 +497,11 @@ def parse_add_staff(text):
 
 def parse_checkout_staff(text):
     """解析離場指令"""
-    match = re.search(r"(?：離場|下班)[:：]\s*(.+?)@(.+?)$", text.strip())
+    match = re.search(r"(?:離場|下班)[:：]\s*(.+?)@(.+?)$", text.strip())
     if match:
         return {"name": match.group(1).strip(), "project": match.group(2).strip()}
     
-    match = re.search(r"(?：離場|下班)[:：]\s*(.+?)$", text.strip())
+    match = re.search(r"(?:離場|下班)[:：]\s*(.+?)$", text.strip())
     if match:
         return {"name": match.group(1).strip(), "project": None}
     return None
@@ -540,13 +540,24 @@ def handle_message(event):
             timestamp, tz=datetime.timezone(datetime.timedelta(hours=8))
         )
         
+        print(f"\n[訊息] User: {user_id[-8:]}, Text: {message_text[:30]}, Time: {message_time.strftime('%H:%M')}")
+        
         # 權限檢查
         user_role = get_user_role(user_id)
         if not user_role:
+            print(f"[拒絕] 無權限用戶")
             return
-                
-        # 完整日報
+        
+        # 重複檢查
+        if is_duplicate_message(user_id, message_text, timestamp):
+            print(f"[重複] 已處理過")
+            return
+        
+        reply_text = None
+        
+        # === 完整日報 ===
         if re.search(r"\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
+            print("📝 處理日報")
             report_data = parse_full_attendance_report(message_text)
             if report_data:
                 session = get_or_create_session(report_data['date'], report_data['project_name'], user_id)
@@ -555,21 +566,36 @@ def handle_message(event):
                 for staff in report_data['staff']:
                     session.add_staff_and_write(staff['name'], staff['note'], message_time)
                 
-                reply_text = session.get_summary()
-                reply_text += "\n✅ 已寫入 Google Sheets"
+                reply_text = f"✅ 已記錄 {len(report_data['staff'])} 人到 {report_data['project_name']}"
+            else:
+                reply_text = "❌ 日報格式錯誤"
         
-        # 新增人員
+        # === 新增人員 ===
         elif "新增" in message_text:
+            print("➕ 新增人員")
             staff_info = parse_add_staff(message_text)
             if staff_info:
                 valid_session = find_session_for_user(user_id, staff_info.get('project'))
                 if valid_session:
                     if valid_session.add_staff_and_write(staff_info['name'], staff_info['note'], message_time):
-                        reply_text = f"✅ 已新增 {staff_info['name']}"
+                        reply_text = f"✅ 已新增 {staff_info['name']} ({message_time.strftime('%H:%M')})"
+                    else:
+                        reply_text = f"⚠️ {staff_info['name']} 已在清單中"
+                elif staff_info.get('project'):
+                    reply_text = f"❌ 找不到專案「{staff_info['project']}」"
+                else:
+                    # 多專案情況
+                    active_projects = [s.project_name for s in session_states.values() 
+                                     if can_access_session(user_id, s) and s.project_name]
+                    if len(set(active_projects)) > 1:
+                        reply_text = f"⚠️ 有多個專案，請用: 新增：名字@專案名稱\n可用: {', '.join(set(active_projects)[:3])}"
+                    else:
+                        reply_text = "❌ 請先提交完整日報"
         
-        # 單筆離場
+        # === 單筆離場 ===
         elif ("離場:" in message_text or "離場：" in message_text or 
               "下班:" in message_text or "下班：" in message_text):
+            print("🚶 單筆離場")
             checkout_info = parse_checkout_staff(message_text)
             if checkout_info:
                 valid_session = find_session_for_user(user_id, checkout_info.get('project'))
@@ -578,25 +604,44 @@ def handle_message(event):
                     if person_data:
                         if update_person_checkout(valid_session.work_date, checkout_info['name'], 
                                                  message_time, person_data['add_time']):
-                            reply_text = f"✅ 已記錄 {checkout_info['name']} 離場"
+                            reply_text = f"✅ {checkout_info['name']} 已離場 ({message_time.strftime('%H:%M')})"
+                        else:
+                            reply_text = f"⚠️ 更新失敗，可能已記錄過"
+                    else:
+                        reply_text = f"❌ 找不到 {checkout_info['name']} 的簽到記錄"
+                elif checkout_info.get('project'):
+                    reply_text = f"❌ 找不到專案「{checkout_info['project']}」"
+                else:
+                    reply_text = "❌ 請指定專案名稱"
         
-        # 通用離場
+        # === 通用離場 ===
         elif "人員離場" in message_text or "人員下班" in message_text:
+            print("⬜ 全員離場")
             project_match = re.search(r"@(.+?)$", message_text)
             project_name = project_match.group(1).strip() if project_match else None
             valid_session = find_session_for_user(user_id, project_name)
             
-            if valid_session:
-                default_checkout_time = message_time.replace(hour=17, minute=30)
+            if valid_session and valid_session.staff:
+                default_checkout_time = message_time.replace(hour=16, minute=50, second=0, microsecond=0)
                 count = 0
                 for person in valid_session.staff:
                     if update_person_checkout(valid_session.work_date, person['name'], 
                                             default_checkout_time, person['add_time']):
                         count += 1
-                reply_text = f"✅ 已記錄 {count} 人離場 (17:30)"
+                reply_text = f"✅ 已記錄 {count} 人離場 (預設 16:50)\n專案: {valid_session.project_name}"
+            elif project_name:
+                reply_text = f"❌ 找不到專案「{project_name}」"
+            else:
+                active_projects = [s.project_name for s in session_states.values() 
+                                 if can_access_session(user_id, s) and s.project_name]
+                if len(set(active_projects)) > 1:
+                    reply_text = f"⚠️ 有多個專案，請用: 人員離場@專案名稱"
+                else:
+                    reply_text = "❌ 找不到有效的日報記錄"
         
-        # 查詢出勤
+        # === 查詢出勤 ===
         elif message_text == "查詢本期出勤":
+            print("📊 查詢出勤")
             if attendance_sheet:
                 try:
                     today = date.today()
@@ -612,31 +657,52 @@ def handle_message(event):
                         end_date = next_month.replace(day=5)
                     
                     records = attendance_sheet.get_all_records()
-                    df = pd.DataFrame(records)
-                    df['日期'] = pd.to_datetime(df['日期'].apply(minguo_to_gregorian), errors='coerce')
-                    
-                    period_df = df.dropna(subset=['日期'])
-                    period_df = period_df[
-                        (period_df['日期'] >= pd.to_datetime(start_date)) &
-                        (period_df['日期'] <= pd.to_datetime(end_date))
-                    ]
-                    
-                    if not period_df.empty:
-                        period_df['出勤時數'] = pd.to_numeric(period_df['出勤時數'], errors='coerce')
-                        summary = period_df.groupby('姓名')['出勤時數'].sum().reset_index()
-                        reply_text = f"📅 本期統計：\n"
-                        for _, row in summary.iterrows():
-                            reply_text += f"• {row['姓名']}: {row['出勤時數']} 天\n"
+                    if records:
+                        df = pd.DataFrame(records)
+                        df['日期'] = pd.to_datetime(df['日期'].apply(minguo_to_gregorian), errors='coerce')
+                        
+                        period_df = df.dropna(subset=['日期'])
+                        period_df = period_df[
+                            (period_df['日期'] >= pd.to_datetime(start_date)) &
+                            (period_df['日期'] <= pd.to_datetime(end_date))
+                        ]
+                        
+                        if not period_df.empty:
+                            period_df['出勤時數'] = pd.to_numeric(period_df['出勤時數'], errors='coerce')
+                            summary = period_df.groupby('姓名')['出勤時數'].sum().reset_index()
+                            reply_text = f"📅 本期 ({start_date.strftime('%m/%d')}-{end_date.strftime('%m/%d')}) 統計：\n"
+                            for _, row in summary.iterrows():
+                                reply_text += f"• {row['姓名']}: {row['出勤時數']} 天\n"
+                        else:
+                            reply_text = "本期無出勤記錄"
                     else:
-                        reply_text = "查詢範圍內無出勤記錄"
+                        reply_text = "試算表無資料"
                 except Exception as e:
-                    reply_text = f"❌ 查詢失敗: {str(e)}"
+                    reply_text = f"❌ 查詢失敗: {str(e)[:50]}"
+                    print(f"查詢錯誤: {e}")
+            else:
+                reply_text = "❌ Google Sheets 未連線"
         
+        # === 系統狀態查詢 ===
+        elif message_text == "系統狀態" and user_role == "ADMIN":
+            reply_text = f"📊 系統狀態\n"
+            reply_text += f"Session 數: {len(session_states)}\n"
+            reply_text += f"今日專案: {len([s for s in session_states.values() if s.work_date == date.today().strftime('%Y/%m/%d')])}"
+        
+        # === 發送回覆 ===
         if reply_text:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            try:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+                print(f"✅ 已回覆: {reply_text[:30]}")
+            except Exception as e:
+                print(f"❌ 回覆失敗: {e}")
+        else:
+            # 即使沒有處理，也不回覆（避免 reply token 錯誤）
+            print(f"⚠️ 未識別的指令，不回覆")
         
     except Exception as e:
         print(f"❌ 處理錯誤: {e}")
+        # 發生錯誤時不要嘗試回覆，避免 Invalid reply token
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 5000))
