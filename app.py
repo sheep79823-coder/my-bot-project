@@ -388,75 +388,6 @@ class DailySession:
         for i, person in enumerate(self.staff, 1):
             summary += f"  {i}. {person['name']}\n"
         return summary
-def get_or_create_session(user_id, work_date, project_name=None):
-    """取得或建立該日期和專案的對話狀態"""
-    if project_name is None:
-        project_name = ""
-    # 改用 (user_id, work_date, project_name) 作為 key，支持同一天多專案
-    session_key = f"{user_id}_{work_date}_{project_name}"
-    if session_key not in session_states:
-        session_states[session_key] = DailySession(user_id, work_date, project_name)
-    return session_states[session_key]
-
-def parse_full_attendance_report(text):
-    try:
-        lines = text.strip().split('\n')
-        if len(lines) < 2:
-            return None
-        
-        date_match = re.match(r"^(\d{3}/\d{2}/\d{2})", lines[0])
-        if not date_match:
-            return None
-        work_date = date_match.group(1)
-        
-        project_name = lines[1].strip()
-        if not project_name:
-            return None
-        
-        staff_start_idx = None
-        for i, line in enumerate(lines):
-            if "人員" in line or "出工" in line:
-                staff_start_idx = i + 1
-                break
-        
-        if staff_start_idx is None:
-            staff_start_idx = 2
-        
-        staff_list = []
-        
-        for i in range(staff_start_idx, len(lines)):
-            line = lines[i].strip()
-            
-            if not line:
-                continue
-            
-            if "共計" in line or "便當" in line or "總計" in line:
-                continue
-            
-            clean_line = re.sub(r"^\d+[\.\、]", "", line).strip()
-            
-            note_match = re.search(r"\((.+)\)", clean_line)
-            if note_match:
-                note = note_match.group(1)
-                name = clean_line[:note_match.start()].strip()
-                staff_list.append({"name": name, "note": note})
-            else:
-                if clean_line:
-                    staff_list.append({"name": clean_line, "note": None})
-        
-        if not staff_list:
-            return None
-        
-        return {
-            "date": work_date,
-            "project_name": project_name,
-            "staff": staff_list
-        }
-    except Exception as e:
-        print(f"❌ 解析日報錯誤: {e}")
-        return None
-
-
 
 def get_or_create_session(work_date, project_name, user_id):
     """取得或建立 Session - 線程安全"""
@@ -483,25 +414,46 @@ def find_session_for_user(user_id, project_name=None, work_date=None):
     role = get_user_role(user_id)
     accessible_sessions = []
     
+    print(f"[查找] 用戶角色: {role}, 目標日期: {work_date}, 指定專案: {project_name}")
+    
     for session_key, session in session_states.items():
+        # 確保日期匹配
         if session.work_date == work_date:
             if role == "ADMIN":
                 accessible_sessions.append(session)
+                print(f"  [管理員] 可存取: {session.project_name}")
             elif role == "MANAGER" and session.is_authorized(user_id):
                 accessible_sessions.append(session)
+                print(f"  [經理] 可存取: {session.project_name}")
     
+    print(f"[查找] 共找到 {len(accessible_sessions)} 個可存取的 Session")
+    
+    # 情況1: 指定了專案名稱 - 精確匹配
     if project_name:
         for session in accessible_sessions:
             if session.project_name == project_name:
+                print(f"[匹配] 精確匹配成功: {project_name}")
                 return session
+        # 如果精確匹配失敗，嘗試部分匹配
+        for session in accessible_sessions:
+            if project_name in session.project_name or session.project_name in project_name:
+                print(f"[匹配] 部分匹配成功: {session.project_name}")
+                return session
+        print(f"[匹配] 找不到專案: {project_name}")
         return None
     
+    # 情況2: 沒指定專案名稱
     if len(accessible_sessions) == 0:
+        print(f"[查找] 沒有可用的 Session")
         return None
     elif len(accessible_sessions) == 1:
+        print(f"[查找] 唯一 Session: {accessible_sessions[0].project_name}")
         return accessible_sessions[0]
     else:
-        return max(accessible_sessions, key=lambda s: s.created_time)
+        # 多個專案，返回最近的
+        latest = max(accessible_sessions, key=lambda s: s.created_time)
+        print(f"[查找] 返回最新的 Session: {latest.project_name}")
+        return latest
 
 # 解析函式
 def parse_full_attendance_report(text):
@@ -619,7 +571,7 @@ def handle_message(event):
         if not user_role:
             print(f"[拒絕] 無權限用戶")
             return
-        
+
         # 重複檢查
         if is_duplicate_message(user_id, message_text, timestamp):
             print(f"[重複] 已處理過")
@@ -632,14 +584,21 @@ def handle_message(event):
             print("📝 處理日報")
             report_data = parse_full_attendance_report(message_text)
             if report_data:
+                print(f"[解析] 日期: {report_data['date']}, 專案: {report_data['project_name']}, 人數: {len(report_data['staff'])}")
                 session = get_or_create_session(report_data['date'], report_data['project_name'], user_id)
                 session.project_name = report_data['project_name']
                 
+                success_count = 0
                 for staff in report_data['staff']:
-                    session.add_staff_and_write(staff['name'], staff['note'], message_time)
+                    if session.add_staff_and_write(staff['name'], staff['note'], message_time):
+                        success_count += 1
                 
-                reply_text = f"✅ 已記錄 {len(report_data['staff'])} 人到 {report_data['project_name']}"
+                print(f"[Session] 已建立 Key: {report_data['date']}_{report_data['project_name']}")
+                print(f"[寫入] 成功: {success_count}/{len(report_data['staff'])}")
+                
+                reply_text = f"✅ 已記錄 {success_count} 人\n專案: {report_data['project_name'][:20]}...\n日期: {report_data['date']}"
             else:
+                print("[解析失敗] 無法解析日報")
                 reply_text = "❌ 日報格式錯誤"
         
         # === 新增人員 ===
@@ -694,13 +653,13 @@ def handle_message(event):
             valid_session = find_session_for_user(user_id, project_name)
             
             if valid_session and valid_session.staff:
-                default_checkout_time = message_time.replace(hour=17, minute=30, second=0, microsecond=0)
+                default_checkout_time = message_time.replace(hour=16, minute=50, second=0, microsecond=0)
                 count = 0
                 for person in valid_session.staff:
                     if update_person_checkout(valid_session.work_date, person['name'], 
                                             default_checkout_time, person['add_time']):
                         count += 1
-                reply_text = f"✅ 已記錄 {count} 人離場 (預設 17:30)\n專案: {valid_session.project_name}"
+                reply_text = f"✅ 已記錄 {count} 人離場 (預設 16:50)\n專案: {valid_session.project_name}"
             elif project_name:
                 reply_text = f"❌ 找不到專案「{project_name}」"
             else:
