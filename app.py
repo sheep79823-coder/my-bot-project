@@ -24,6 +24,10 @@ YOUR_CHANNEL_ACCESS_TOKEN = os.environ.get('YOUR_CHANNEL_ACCESS_TOKEN')
 YOUR_CHANNEL_SECRET = os.environ.get('YOUR_CHANNEL_SECRET')
 GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
 
+# HR 系統同步設定
+HR_API_URL   = os.environ.get('HR_API_URL', 'https://hr.yitai-c.uk')
+HR_API_TOKEN = os.environ.get('HR_API_TOKEN', 'hr-internal-token-2024')
+
 # 權限管理
 ADMIN_USER_IDS = ["U724ac19c55418145a5af5aa1af558cbb"]
 MANAGER_USER_IDS = [
@@ -209,6 +213,44 @@ def can_access_session(user_id, session):
     return False
 
 # Google Sheets 操作函式
+def sync_to_hr(action, name, work_date_minguo, rec_time, project=""):
+    """
+    同步簽到/離場到 HR 系統
+    work_date_minguo: 民國年字串 e.g. '113/04/24'
+    rec_time: datetime.datetime 物件
+    """
+    try:
+        greg_date = minguo_to_gregorian(work_date_minguo)
+        if not greg_date:
+            print(f"[HR同步] 日期轉換失敗: {work_date_minguo}")
+            return False
+        payload = {
+            "action":  action,
+            "name":    name,
+            "date":    greg_date.strftime('%Y-%m-%d'),
+            "time":    rec_time.strftime('%H:%M'),
+            "project": project,
+        }
+        resp = requests.post(
+            f"{HR_API_URL}/api/attendance/sync",
+            json=payload,
+            headers={"X-API-Token": HR_API_TOKEN},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            print(f"[HR同步] ✅ {action} {name} → {resp.json()}")
+            return True
+        elif resp.status_code == 404:
+            print(f"[HR同步] ⚠️ 員工未在 HR 系統：{name}")
+            return False
+        else:
+            print(f"[HR同步] ❌ HTTP {resp.status_code}: {resp.text[:100]}")
+            return False
+    except Exception as e:
+        print(f"[HR同步] ❌ 例外：{e}")
+        return False
+
+
 def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, note=""):
     """立即寫入簽到記錄"""
     if not attendance_sheet:
@@ -230,6 +272,8 @@ def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, no
         ]
         attendance_sheet.append_row(new_row)
         print(f"✅ 已即時寫入 {person_name} 的簽到記錄")
+        # 同步到 HR 系統
+        sync_to_hr('checkin', person_name, work_date, sign_in_time, project_name)
         return True
     except Exception as e:
         print(f"❌ 寫入失敗: {e}")
@@ -275,6 +319,9 @@ def update_person_checkout(work_date, person_name, checkout_time, sign_in_time):
             attendance_sheet.update_cell(target_row, 5, days)
             attendance_sheet.update_cell(target_row, 6, remark.strip())
             print(f"✅ 已更新 {person_name} 的離場記錄: {days} 天")
+            # 同步到 HR 系統（需要 work_date，從 attendance_sheet 的記錄取）
+            record_date = records[target_row - 2].get('日期', '')
+            sync_to_hr('checkout', person_name, record_date, checkout_time)
             return True
         
         return False
