@@ -510,10 +510,13 @@ def parse_full_attendance_report(text):
         if len(lines) < 2:
             return None
         
-        date_match = re.match(r"^(\d{3}/\d{2}/\d{2})", lines[0])
+        date_match = re.match(r"^(0?\d{3}/\d{2}/\d{2})", lines[0])
         if not date_match:
             return None
-        work_date = date_match.group(1)
+        # 去掉民國年前導零 (0115 -> 115)
+        raw_date = date_match.group(1)
+        parts = raw_date.split('/')
+        work_date = f"{int(parts[0])}/{parts[1]}/{parts[2]}"
         
         project_name = lines[1].strip()
         if not project_name:
