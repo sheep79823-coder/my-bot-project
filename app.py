@@ -958,6 +958,60 @@ def handle_message(event):
             else:
                 reply_text = "❌ Google Sheets 未連線"
         
+        # === 開啟日報 LIFF ===
+        elif message_text in ("開啟日報", "日報", "新增日報"):
+            print("📋 發送 LIFF 按鈕")
+            from linebot.models import FlexSendMessage
+            flex_message = FlexSendMessage(
+                alt_text="點此開啟日報表單",
+                contents={
+                    "type": "bubble",
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "text",
+                                "text": "📋 出工日報",
+                                "weight": "bold",
+                                "size": "xl",
+                                "color": "#2d3748"
+                            },
+                            {
+                                "type": "text",
+                                "text": "點下方按鈕開啟填寫表單",
+                                "size": "sm",
+                                "color": "#718096",
+                                "margin": "sm"
+                            }
+                        ]
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "color": "#06c755",
+                                "action": {
+                                    "type": "uri",
+                                    "label": "開啟日報表單",
+                                    "uri": f"https://liff.line.me/{LIFF_ID}"
+                                },
+                                "height": "sm"
+                            }
+                        ]
+                    }
+                }
+            )
+            try:
+                line_bot_api.reply_message(event.reply_token, flex_message)
+                print("✅ 已發送 LIFF 按鈕")
+            except Exception as e:
+                print(f"❌ 發送失敗: {e}")
+            return
+
         # === 系統狀態查詢 ===
         elif message_text == "系統狀態" and user_role == "ADMIN":
             reply_text = f"📊 系統狀態\n"
