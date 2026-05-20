@@ -482,31 +482,43 @@ def update_person_checkout(work_date, person_name, checkout_time, sign_in_time):
         
         if target_row:
             checkout_hour = checkout_time.hour
+            checkout_minute = checkout_time.minute
             sign_in_hour = sign_in_time.hour
             
-            # 計算出勤天數
-            if sign_in_hour < 10:
-                days = 1.0
-                remark = ""
-            elif sign_in_hour < 13:
+            # 計算出勤天數（以簽到時間判斷）
+            if sign_in_hour < 13:
                 days = 1.0
                 remark = ""
             else:
                 days = 0.5
                 remark = "下午簽到"
             
-            # 16:00 前早退
+            # 16:00 前提前離場
             if checkout_hour < 16:
                 days = 0.5
-                remark = f"早退({checkout_time.strftime('%H:%M')})"
-            # 17:00 後加班
-            elif checkout_hour >= 17:
-                remark = (remark + " " if remark else "") + "加班"
+                remark = f"提前離場({checkout_time.strftime('%H:%M')})"
+            
+            # 計算加班時數（17:00 後才開始算，以 30 分為單位，超過 15 分進位）
+            overtime_hours = 0.0
+            if checkout_hour >= 17:
+                overtime_minutes = (checkout_hour - 17) * 60 + checkout_minute
+                if overtime_minutes > 0:
+                    # 每 30 分一單位，超過 15 分進位
+                    units = overtime_minutes // 30
+                    remainder = overtime_minutes % 30
+                    if remainder > 15:
+                        units += 1
+                    overtime_hours = units * 0.5
+                if overtime_hours > 0:
+                    remark = (remark + " " if remark else "") + f"加班{overtime_hours}h"
             
             attendance_sheet.update_cell(target_row, 4, checkout_time.strftime('%H:%M'))
             attendance_sheet.update_cell(target_row, 5, days)
             attendance_sheet.update_cell(target_row, 6, remark.strip())
-            print(f"✅ 已更新 {person_name} 的離場記錄: {days} 天")
+            # 若有加班時數，寫入第 8 欄（加班時數）
+            if overtime_hours > 0:
+                attendance_sheet.update_cell(target_row, 8, overtime_hours)
+            print(f"✅ 已更新 {person_name} 的離場記錄: {days} 天, 加班 {overtime_hours}h")
             # 同步到 HR 系統（需要 work_date，從 attendance_sheet 的記錄取）
             record_date = records[target_row - 2].get('日期', '')
             sync_to_hr('checkout', person_name, record_date, checkout_time)
@@ -771,6 +783,16 @@ def parse_checkout_staff(text):
         return {"name": match.group(1).strip(), "project": None}
     return None
 
+def parse_early_leave(text):
+    """解析提前離場指令：提前離場：王小明 或 提前離場：王小明@專案"""
+    match = re.search(r"提前離場[:：]\s*(.+?)@(.+?)$", text.strip())
+    if match:
+        return {"name": match.group(1).strip(), "project": match.group(2).strip()}
+    match = re.search(r"提前離場[:：]\s*(.+?)$", text.strip())
+    if match:
+        return {"name": match.group(1).strip(), "project": None}
+    return None
+
 def minguo_to_gregorian(minguo_str):
     """民國年轉西元年"""
     try:
@@ -863,6 +885,36 @@ def handle_message(event):
                         reply_text = f"⚠️ 有多個專案，請用: 新增：名字@專案名稱\n可用: {', '.join(set(active_projects)[:3])}"
                     else:
                         reply_text = "❌ 請先提交完整日報"
+        
+        # === 提前離場（簽到後直接指定提前走）===
+        elif "提前離場:" in message_text or "提前離場：" in message_text:
+            print("🏃 提前離場")
+            early_info = parse_early_leave(message_text)
+            if early_info:
+                valid_session = find_session_for_user(user_id, early_info.get('project'))
+                if valid_session:
+                    person_data = next((p for p in valid_session.staff if p['name'] == early_info['name']), None)
+                    if person_data:
+                        if update_person_checkout(valid_session.work_date, early_info['name'],
+                                                 message_time, person_data['add_time']):
+                            reply_text = f"✅ {early_info['name']} 提前離場 ({message_time.strftime('%H:%M')})"
+                        else:
+                            reply_text = f"⚠️ 更新失敗，可能已記錄過"
+                    else:
+                        # 找不到簽到記錄 → 自動先幫他簽到再記提前離場
+                        if valid_session.add_staff_and_write(early_info['name'], "補簽到", message_time):
+                            person_data = next((p for p in valid_session.staff if p['name'] == early_info['name']), None)
+                            if person_data and update_person_checkout(valid_session.work_date, early_info['name'],
+                                                                      message_time, person_data['add_time']):
+                                reply_text = f"✅ {early_info['name']} 補簽到並記錄提前離場 ({message_time.strftime('%H:%M')})"
+                            else:
+                                reply_text = f"⚠️ 已補簽到，但離場更新失敗"
+                        else:
+                            reply_text = f"❌ 找不到 {early_info['name']} 的簽到記錄，且補簽到失敗"
+                elif early_info.get('project'):
+                    reply_text = f"❌ 找不到專案「{early_info['project']}」"
+                else:
+                    reply_text = "❌ 請先提交日報或指定專案名稱"
         
         # === 單筆離場 ===
         elif ("離場:" in message_text or "離場：" in message_text or 
