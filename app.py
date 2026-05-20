@@ -37,7 +37,7 @@ MANAGER_USER_IDS = [
 ]
 
 GOOGLE_SHEET_NAME = "我的工務助理資料庫"
-WORKSHEET_NAME = "出勤總表"
+WORKSHEET_NAME = "出勤時數計算"
 ATTENDANCE_SHEET_NAME = "出勤時數計算"
 DAILY_SUMMARY_SHEET = "每日統整"
 
