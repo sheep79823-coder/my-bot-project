@@ -631,7 +631,7 @@ def handle_message(event):
         reply_text = None
         
         # === 完整日報 ===
-        if re.search(r"\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
+        if re.search(r"0?\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
             print("📝 處理日報")
             report_data = parse_full_attendance_report(message_text)
             if report_data:
