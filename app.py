@@ -36,6 +36,8 @@ MANAGER_USER_IDS = [
     "Uaa8464a6b973709e941e2c6a3fd51441"
 ]
 
+LIFF_ID = "2010148908-W1ntyx8i"
+
 GOOGLE_SHEET_NAME = "我的工務助理資料庫"
 WORKSHEET_NAME = "出勤時數計算"
 ATTENDANCE_SHEET_NAME = "出勤時數計算"
@@ -168,6 +170,191 @@ def keep_alive():
 
 keep_alive_thread = threading.Thread(target=keep_alive, daemon=True)
 keep_alive_thread.start()
+
+@app.route("/liff", methods=['GET'])
+def liff_page():
+    """LIFF 日報輸入表單"""
+    today_tw = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+    minguo_year = today_tw.year - 1911
+    today_str = f"{minguo_year}/{today_tw.month:02d}/{today_tw.day:02d}"
+    html = f"""<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>日報輸入</title>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, sans-serif; background: #f0f4f8; padding: 16px; }}
+  h2 {{ text-align: center; color: #2d3748; margin-bottom: 16px; font-size: 18px; }}
+  .card {{ background: white; border-radius: 12px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }}
+  label {{ display: block; font-size: 13px; color: #718096; margin-bottom: 4px; font-weight: 600; }}
+  input {{ width: 100%; padding: 10px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 15px; }}
+  input:focus {{ outline: none; border-color: #06c755; }}
+  .staff-item {{ display: flex; gap: 8px; margin-bottom: 8px; }}
+  .staff-item input {{ flex: 1; }}
+  .btn-remove {{ background: #fed7d7; color: #c53030; border: none; border-radius: 8px; padding: 0 12px; cursor: pointer; font-size: 16px; }}
+  .btn-add {{ width: 100%; padding: 10px; background: #ebf8f0; color: #276749; border: 1px dashed #9ae6b4; border-radius: 8px; font-size: 14px; cursor: pointer; margin-top: 4px; }}
+  .btn-submit {{ width: 100%; padding: 14px; background: #06c755; color: white; border: none; border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 8px; }}
+  .btn-submit:active {{ background: #05a847; }}
+  #preview {{ background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; font-size: 13px; white-space: pre-wrap; color: #2d3748; min-height: 60px; }}
+</style>
+</head>
+<body>
+<h2>📋 出工日報</h2>
+<div class="card">
+  <label>日期（民國年）</label>
+  <input type="text" id="date" value="{today_str}" placeholder="115/05/20">
+</div>
+<div class="card">
+  <label>工程名稱</label>
+  <input type="text" id="project" placeholder="請輸入工程名稱">
+</div>
+<div class="card">
+  <label>出工人員</label>
+  <div id="staff-list">
+    <div class="staff-item">
+      <input type="text" placeholder="姓名（備註）">
+      <button class="btn-remove" onclick="removeStaff(this)">✕</button>
+    </div>
+  </div>
+  <button class="btn-add" onclick="addStaff()">＋ 新增人員</button>
+</div>
+<div class="card">
+  <label>預覽訊息</label>
+  <div id="preview">填寫後自動預覽...</div>
+</div>
+<button class="btn-submit" onclick="sendReport()">✅ 送出日報</button>
+
+<script>
+liff.init({{ liffId: "{LIFF_ID}" }});
+
+function addStaff() {{
+  const list = document.getElementById('staff-list');
+  const div = document.createElement('div');
+  div.className = 'staff-item';
+  div.innerHTML = '<input type="text" placeholder="姓名（備註）" oninput="updatePreview()"><button class="btn-remove" onclick="removeStaff(this)">✕</button>';
+  list.appendChild(div);
+}}
+
+function removeStaff(btn) {{
+  const items = document.querySelectorAll('.staff-item');
+  if (items.length > 1) {{ btn.parentElement.remove(); updatePreview(); }}
+}}
+
+function getStaffList() {{
+  return Array.from(document.querySelectorAll('.staff-item input'))
+    .map(i => i.value.trim()).filter(v => v);
+}}
+
+function updatePreview() {{
+  const date = document.getElementById('date').value.trim();
+  const project = document.getElementById('project').value.trim();
+  const staff = getStaffList();
+  if (!date || !project) {{ document.getElementById('preview').textContent = '填寫後自動預覽...'; return; }}
+  let msg = date + '\\n' + project + '\\n出工人員：\\n';
+  staff.forEach((s, i) => msg += (i+1) + '. ' + s + '\\n');
+  msg += '共計 ' + staff.length + ' 人';
+  document.getElementById('preview').textContent = msg;
+}}
+
+document.querySelectorAll('input').forEach(i => i.addEventListener('input', updatePreview));
+
+async function sendReport() {{
+  const date = document.getElementById('date').value.trim();
+  const project = document.getElementById('project').value.trim();
+  const staff = getStaffList();
+  if (!date || !project || staff.length === 0) {{
+    alert('請填寫日期、工程名稱，並至少新增一位人員');
+    return;
+  }}
+  let msg = date + '\\n' + project + '\\n出工人員：\\n';
+  staff.forEach((s, i) => msg += (i+1) + '. ' + s + '\\n');
+  msg += '共計 ' + staff.length + ' 人';
+  try {{
+    await liff.sendMessages([{{ type: 'text', text: msg }}]);
+    liff.closeWindow();
+  }} catch(e) {{
+    alert('送出失敗: ' + e.message);
+  }}
+}}
+</script>
+</body>
+</html>"""
+    return html
+
+
+def send_line_push(user_id, text):
+    """推播訊息給指定用戶"""
+    try:
+        line_bot_api.push_message(user_id, TextSendMessage(text=text))
+        print(f"✅ 推播成功: {user_id[-8:]}")
+    except Exception as e:
+        print(f"❌ 推播失敗: {e}")
+
+
+def calculate_period_summary():
+    """計算當前結算期間的出勤統計，回傳文字"""
+    if not attendance_sheet:
+        return None
+    try:
+        today = date.today()
+        if today.day <= 5:
+            start_date = (today.replace(day=1) - timedelta(days=1)).replace(day=21)
+            end_date = today.replace(day=5)
+            period_label = f"{start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}"
+        elif today.day <= 20:
+            start_date = today.replace(day=6)
+            end_date = today.replace(day=20)
+            period_label = f"{start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}"
+        else:
+            start_date = today.replace(day=21)
+            next_month = (today.replace(day=1) + timedelta(days=32)).replace(day=1)
+            end_date = next_month.replace(day=5)
+            period_label = f"{start_date.strftime('%m/%d')} ~ {end_date.strftime('%m/%d')}"
+
+        records = attendance_sheet.get_all_records()
+        if not records:
+            return None
+        df = pd.DataFrame(records)
+        df['日期_dt'] = pd.to_datetime(df['日期'].apply(minguo_to_gregorian), errors='coerce')
+        period_df = df.dropna(subset=['日期_dt'])
+        period_df = period_df[
+            (period_df['日期_dt'] >= pd.to_datetime(start_date)) &
+            (period_df['日期_dt'] <= pd.to_datetime(end_date))
+        ]
+        if period_df.empty:
+            return f"📅 結算期間 {period_label}\n本期無出勤記錄"
+
+        period_df['出勤時數'] = pd.to_numeric(period_df['出勤時數'], errors='coerce')
+        summary = period_df.groupby('姓名')['出勤時數'].sum().reset_index()
+        summary = summary.sort_values('出勤時數', ascending=False)
+
+        text = f"📊 出勤結算報告\n"
+        text += f"📅 期間：{period_label}\n"
+        text += f"{'─'*20}\n"
+        for _, row in summary.iterrows():
+            text += f"• {row['姓名']}: {row['出勤時數']} 天\n"
+        text += f"{'─'*20}\n"
+        text += f"合計 {len(summary)} 人"
+        return text
+    except Exception as e:
+        print(f"❌ 結算計算失敗: {e}")
+        return None
+
+
+def auto_settlement():
+    """每月 5 號、20 號 17:00 自動結算並推播給 ADMIN"""
+    print("📊 自動結算開始")
+    msg = calculate_period_summary()
+    if msg:
+        for admin_id in ADMIN_USER_IDS:
+            send_line_push(admin_id, msg)
+        print(f"✅ 結算報告已推播給 {len(ADMIN_USER_IDS)} 位 ADMIN")
+    else:
+        print("⚠️ 結算無資料，不推播")
+
 
 @app.route("/health", methods=['GET'])
 def health_check():
@@ -395,9 +582,12 @@ def start_scheduler():
     scheduler.add_job(daily_summary, 'cron', hour=22, minute=0, timezone='Asia/Taipei')
     # 定期清理
     scheduler.add_job(cleanup_old_sessions, 'interval', hours=CLEANUP_INTERVAL_HOURS)
+    # 雙週期結算：每月 5 號、20 號 17:00
+    scheduler.add_job(auto_settlement, 'cron', day='5,20', hour=17, minute=0, timezone='Asia/Taipei')
     scheduler.start()
     print("✅ 已啟動排程器")
     print(f"   - 每日 22:00 (台灣時間) 統整出勤")
+    print(f"   - 每月 5/20 號 17:00 自動結算推播")
     print(f"   - 每 {CLEANUP_INTERVAL_HOURS} 小時清理過期 Session")
 
 start_scheduler()
@@ -699,6 +889,9 @@ def handle_message(event):
         # === 通用離場 ===
         elif "人員離場" in message_text or "人員下班" in message_text:
             print("⬜ 全員離場")
+            if user_role not in ("ADMIN", "MANAGER"):
+                print("[拒絕] 非管理者觸發全員離場")
+                return
             project_match = re.search(r"@(.+?)$", message_text)
             project_name = project_match.group(1).strip() if project_match else None
             valid_session = find_session_for_user(user_id, project_name)
@@ -770,6 +963,15 @@ def handle_message(event):
             reply_text = f"📊 系統狀態\n"
             reply_text += f"Session 數: {len(session_states)}\n"
             reply_text += f"今日專案: {len([s for s in session_states.values() if s.work_date == date.today().strftime('%Y/%m/%d')])}"
+        
+        # === ADMIN 手動結算 ===
+        elif message_text == "立即結算" and user_role == "ADMIN":
+            print("💰 手動結算")
+            msg = calculate_period_summary()
+            if msg:
+                reply_text = msg
+            else:
+                reply_text = "❌ 無法取得結算資料"
         
         # === 發送回覆 ===
         if reply_text:
