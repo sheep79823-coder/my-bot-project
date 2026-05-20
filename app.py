@@ -22,7 +22,7 @@ app = Flask(__name__)
 
 YOUR_CHANNEL_ACCESS_TOKEN = os.environ.get('YOUR_CHANNEL_ACCESS_TOKEN')
 YOUR_CHANNEL_SECRET = os.environ.get('YOUR_CHANNEL_SECRET')
-GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get('GOOGLE_SHEETS_CREDENTIALS')
+GOOGLE_SHEETS_CREDENTIALS_JSON = os.environ.get('GOOGLE_SHEETS_CREDENTIALS_JSON')
 
 # HR 系統同步設定
 HR_API_URL   = os.environ.get('HR_API_URL', 'https://hr.yitai-c.uk')
