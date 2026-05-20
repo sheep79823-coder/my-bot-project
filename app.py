@@ -11,7 +11,7 @@ from flask import Flask, request, abort, g
 from google.oauth2.service_account import Credentials
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import MessageEvent, TextMessage, TextSendMessage
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMessage
 import threading
 import time
 import hashlib
@@ -56,6 +56,7 @@ processed_messages = {}
 DUPLICATE_CHECK_WINDOW = 300
 session_states = {}
 session_lock = threading.Lock()  # [新增] 線程安全鎖
+pending_photos = {}  # key=group_id, value=LINE image message_id（等待附到下一筆日報）
 
 # Google Sheets 連線
 try:
@@ -199,6 +200,9 @@ def liff_page():
   .btn-submit {{ width: 100%; padding: 14px; background: #06c755; color: white; border: none; border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; margin-top: 8px; }}
   .btn-submit:active {{ background: #05a847; }}
   #preview {{ background: #f7fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; font-size: 13px; white-space: pre-wrap; color: #2d3748; min-height: 60px; }}
+  .photo-label {{ display: flex; flex-direction: column; align-items: center; justify-content: center; border: 2px dashed #9ae6b4; border-radius: 10px; padding: 20px; cursor: pointer; color: #276749; font-size: 14px; gap: 6px; }}
+  .photo-label span {{ font-size: 28px; }}
+  #photo-preview {{ width: 100%; border-radius: 8px; margin-top: 10px; display: none; }}
 </style>
 </head>
 <body>
@@ -220,6 +224,14 @@ def liff_page():
     </div>
   </div>
   <button class="btn-add" onclick="addStaff()">＋ 新增人員</button>
+</div>
+<div class="card">
+  <label>施工單照片（選填）</label>
+  <label class="photo-label" for="photo-input">
+    <span>📷</span>點擊拍照或選取圖片
+  </label>
+  <input type="file" id="photo-input" accept="image/*" capture="environment" style="display:none" onchange="previewPhoto(this)">
+  <img id="photo-preview" alt="施工單預覽">
 </div>
 <div class="card">
   <label>預覽訊息</label>
@@ -261,6 +273,35 @@ function updatePreview() {{
 
 document.querySelectorAll('input').forEach(i => i.addEventListener('input', updatePreview));
 
+function previewPhoto(input) {{
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {{
+    const img = document.getElementById('photo-preview');
+    img.src = e.target.result;
+    img.style.display = 'block';
+    // 更新上傳按鈕文字
+    document.querySelector('.photo-label').innerHTML = '<span>✅</span>已選取：' + file.name;
+  }};
+  reader.readAsDataURL(file);
+}}
+
+async function uploadPhoto() {{
+  const input = document.getElementById('photo-input');
+  if (!input.files[0]) return null;
+  const formData = new FormData();
+  formData.append('photo', input.files[0]);
+  try {{
+    const resp = await fetch('/upload-photo', {{ method: 'POST', body: formData }});
+    const data = await resp.json();
+    return data.url || null;
+  }} catch(e) {{
+    console.warn('照片上傳失敗', e);
+    return null;
+  }}
+}}
+
 async function sendReport() {{
   const date = document.getElementById('date').value.trim();
   const project = document.getElementById('project').value.trim();
@@ -272,10 +313,20 @@ async function sendReport() {{
   let msg = date + '\\n' + project + '\\n出工人員：\\n';
   staff.forEach((s, i) => msg += (i+1) + '. ' + s + '\\n');
   msg += '共計 ' + staff.length + ' 人';
+
+  // 上傳照片（若有）
+  const btn = document.querySelector('.btn-submit');
+  btn.textContent = '送出中...';
+  btn.disabled = true;
+  const photoUrl = await uploadPhoto();
+  if (photoUrl) msg += '\\n[PHOTO]' + photoUrl;
+
   try {{
     await liff.sendMessages([{{ type: 'text', text: msg }}]);
     liff.closeWindow();
   }} catch(e) {{
+    btn.textContent = '✅ 送出日報';
+    btn.disabled = false;
     alert('送出失敗: ' + e.message);
   }}
 }}
@@ -364,6 +415,36 @@ def health_check():
         'sessions': len(session_states),
         'memory_info': f'{gc.get_count()}'
     }), 200, {'Content-Type': 'application/json'}
+
+@app.route("/upload-photo", methods=['POST'])
+def upload_photo():
+    """接收 LIFF 上傳的施工單照片，暫存並回傳公開 URL"""
+    import uuid
+    from werkzeug.utils import secure_filename
+    if 'photo' not in request.files:
+        return json.dumps({'error': '沒有檔案'}), 400
+    file = request.files['photo']
+    if file.filename == '':
+        return json.dumps({'error': '空檔名'}), 400
+    ext = os.path.splitext(secure_filename(file.filename))[1] or '.jpg'
+    filename = f"{uuid.uuid4().hex}{ext}"
+    upload_dir = '/tmp/photos'
+    os.makedirs(upload_dir, exist_ok=True)
+    filepath = os.path.join(upload_dir, filename)
+    file.save(filepath)
+    render_url = os.environ.get('RENDER_URL', 'https://my-bot-project-p5uy.onrender.com')
+    url = f"{render_url}/photo/{filename}"
+    print(f"📸 照片上傳: {filename}")
+    return json.dumps({'url': url}), 200, {'Content-Type': 'application/json'}
+
+@app.route("/photo/<filename>", methods=['GET'])
+def serve_photo(filename):
+    """提供暫存照片（讓 LINE 可以載入）"""
+    from flask import send_from_directory
+    import re as _re
+    if not _re.match(r'^[a-f0-9]{32}\.(jpg|jpeg|png|gif|webp)$', filename):
+        return 'Not found', 404
+    return send_from_directory('/tmp/photos', filename)
 
 def is_duplicate_message(user_id, message_text, timestamp):
     """檢查重複訊息"""
@@ -826,6 +907,8 @@ def handle_message(event):
         message_time = datetime.datetime.fromtimestamp(
             timestamp, tz=datetime.timezone(datetime.timedelta(hours=8))
         )
+        # 取得 group_id（群組訊息才有，私訊用 user_id 代替）
+        group_id = getattr(event.source, 'group_id', None) or user_id
         
         print(f"\n[訊息] User: {user_id[-8:]}, Text: {message_text[:30]}, Time: {message_time.strftime('%H:%M')}")
         
@@ -845,7 +928,15 @@ def handle_message(event):
         # === 完整日報 ===
         if re.search(r"0?\d{3}/\d{2}/\d{2}", message_text) and any(char in message_text for char in ["人員", "出工"]):
             print("📝 處理日報")
-            report_data = parse_full_attendance_report(message_text)
+            # 分離照片 URL（若有）
+            photo_url = None
+            clean_text = message_text
+            photo_match = re.search(r'\[PHOTO\](https?://\S+)', message_text)
+            if photo_match:
+                photo_url = photo_match.group(1)
+                clean_text = message_text[:photo_match.start()].strip()
+
+            report_data = parse_full_attendance_report(clean_text)
             if report_data:
                 print(f"[解析] 日期: {report_data['date']}, 專案: {report_data['project_name']}, 人數: {len(report_data['staff'])}")
                 session = get_or_create_session(report_data['date'], report_data['project_name'], user_id)
@@ -860,6 +951,21 @@ def handle_message(event):
                 print(f"[寫入] 成功: {success_count}/{len(report_data['staff'])}")
                 
                 reply_text = f"✅ 已記錄 {success_count} 人\n專案: {report_data['project_name'][:20]}...\n日期: {report_data['date']}"
+                
+                # 若有照片，push 圖片訊息到群組
+                if photo_url and group_id:
+                    try:
+                        from linebot.models import ImageSendMessage
+                        line_bot_api.push_message(
+                            group_id,
+                            ImageSendMessage(
+                                original_content_url=photo_url,
+                                preview_image_url=photo_url
+                            )
+                        )
+                        print(f"📸 已發送施工單照片到群組")
+                    except Exception as img_e:
+                        print(f"⚠️ 發送照片失敗: {img_e}")
             else:
                 print("[解析失敗] 無法解析日報")
                 reply_text = "❌ 日報格式錯誤"
