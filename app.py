@@ -254,6 +254,7 @@ def sync_to_hr(action, name, work_date_minguo, rec_time, project=""):
 def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, note=""):
     """立即寫入簽到記錄"""
     if not attendance_sheet:
+        print(f"❌ write_person_to_sheet 失敗: attendance_sheet 未初始化（Sheets連線失敗）")
         return False
     
     try:
