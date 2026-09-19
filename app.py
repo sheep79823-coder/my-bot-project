@@ -15,10 +15,17 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, ImageMess
 import threading
 import time
 import hashlib
+import requests
 from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- 初始設定 ---
 app = Flask(__name__)
+
+# Render 主機是 UTC，台灣早上 8 點前 date.today() 會是「昨天」，一律改用台灣時間
+TW_TZ = datetime.timezone(datetime.timedelta(hours=8))
+
+def tw_today():
+    return datetime.datetime.now(TW_TZ).date()
 
 YOUR_CHANNEL_ACCESS_TOKEN = os.environ.get('YOUR_CHANNEL_ACCESS_TOKEN')
 YOUR_CHANNEL_SECRET = os.environ.get('YOUR_CHANNEL_SECRET')
@@ -104,7 +111,7 @@ def cleanup_old_sessions():
     with session_lock:
         try:
             current_time = time.time()
-            cutoff_date = date.today() - timedelta(days=SESSION_EXPIRE_DAYS)
+            cutoff_date = tw_today() - timedelta(days=SESSION_EXPIRE_DAYS)
             
             # 清理過期 Session
             sessions_to_remove = []
@@ -350,7 +357,7 @@ def calculate_period_summary():
     if not attendance_sheet:
         return None
     try:
-        today = date.today()
+        today = tw_today()
         if today.day <= 5:
             start_date = (today.replace(day=1) - timedelta(days=1)).replace(day=21)
             end_date = today.replace(day=5)
@@ -548,7 +555,7 @@ def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, no
         print(f"❌ 寫入失敗: {e}")
         return False
 
-def update_person_checkout(work_date, person_name, checkout_time, sign_in_time):
+def update_person_checkout(work_date, person_name, checkout_time, sign_in_time, is_default=False):
     """更新離場時間和出勤天數"""
     if not attendance_sheet:
         return False
@@ -593,6 +600,9 @@ def update_person_checkout(work_date, person_name, checkout_time, sign_in_time):
                 if overtime_hours > 0:
                     remark = (remark + " " if remark else "") + f"加班{overtime_hours}h"
             
+            if is_default:
+                # 全員離場的預設時間不是真實打卡，明確標記讓後續報表能區分
+                remark = (remark + " " if remark else "") + "預設離場"
             attendance_sheet.update_cell(target_row, 4, checkout_time.strftime('%H:%M'))
             attendance_sheet.update_cell(target_row, 5, days)
             attendance_sheet.update_cell(target_row, 6, remark.strip())
@@ -622,7 +632,7 @@ def daily_summary():
         return
     
     try:
-        today = date.today()
+        today = tw_today()
         minguo_year = today.year - 1911
         today_str = f"{minguo_year:03d}/{today.month:02d}/{today.day:02d}"
         
@@ -733,9 +743,62 @@ def get_or_create_session(work_date, project_name, user_id):
         session_states[session_key].add_authorized_user(user_id)
         return session_states[session_key]
 
+_last_rebuild = {}
+
+def rebuild_sessions_from_sheet(work_date, user_id):
+    """服務休眠/重啟後記憶體裡的日報 Session 會消失。
+    從 Google Sheet 當天的簽到列還原「尚未離場」的人員，避免出現「找不到有效的日報記錄」。
+    回傳是否有還原到任何人。"""
+    if not attendance_sheet or get_user_role(user_id) is None:
+        return False
+    now = time.time()
+    if now - _last_rebuild.get(work_date, 0) < 30:  # 避免連續輸入錯誤時狂讀 Sheet
+        return False
+    _last_rebuild[work_date] = now
+    try:
+        records = attendance_sheet.get_all_records()
+    except Exception as e:
+        print(f"[還原Session] 讀取 Sheet 失敗: {e}")
+        return False
+
+    greg = minguo_to_gregorian(work_date)
+    restored = False
+    for rec in records:
+        if str(rec.get('日期', '')).strip() != work_date:
+            continue
+        name = str(rec.get('姓名', '')).strip()
+        if not name or str(rec.get('離場時間', '')).strip():
+            continue  # 已經離場的不需要還原
+        m = re.match(r'項目[:：]\s*(.+)', str(rec.get('備註', '')).strip())
+        project = m.group(1).strip() if m else ""
+        add_time = None
+        t = re.search(r'(\d{1,2}):(\d{2})', str(rec.get('簽到時間', '')))
+        if t and greg:
+            add_time = datetime.datetime(greg.year, greg.month, greg.day,
+                                         int(t.group(1)), int(t.group(2)), tzinfo=TW_TZ)
+        if add_time is None:
+            continue
+        session = get_or_create_session(work_date, project, user_id)
+        if name not in [x['name'] for x in session.staff]:
+            session.staff.append({"name": name, "add_time": add_time, "note": "還原"})
+            restored = True
+    if restored:
+        print(f"[還原Session] 已從 Sheet 還原 {work_date} 的日報人員")
+    return restored
+
 def find_session_for_user(user_id, project_name=None, work_date=None):
+    """找 Session；找不到時嘗試從 Google Sheet 還原後再找一次"""
+    if work_date is None:
+        t = tw_today()
+        work_date = f"{t.year - 1911:03d}/{t.month:02d}/{t.day:02d}"
+    result = _find_session_for_user(user_id, project_name, work_date)
+    if result is None and rebuild_sessions_from_sheet(work_date, user_id):
+        result = _find_session_for_user(user_id, project_name, work_date)
+    return result
+
+def _find_session_for_user(user_id, project_name=None, work_date=None):
     """智能找到用戶要操作的 Session"""
-    today = date.today()
+    today = tw_today()
     minguo_year = today.year - 1911
     today_str = f"{minguo_year:03d}/{today.month:02d}/{today.day:02d}"
     
@@ -1059,9 +1122,11 @@ def handle_message(event):
                 count = 0
                 for person in valid_session.staff:
                     if update_person_checkout(valid_session.work_date, person['name'], 
-                                            default_checkout_time, person['add_time']):
+                                            default_checkout_time, person['add_time'], is_default=True):
                         count += 1
                 reply_text = f"✅ 已記錄 {count} 人離場 (預設 16:50)\n專案: {valid_session.project_name}"
+            elif valid_session:
+                reply_text = f"ℹ️ 專案「{valid_session.project_name}」目前沒有待離場的人員（可能都已離場）"
             elif project_name:
                 reply_text = f"❌ 找不到專案「{project_name}」"
             else:
@@ -1077,7 +1142,7 @@ def handle_message(event):
             print("📊 查詢出勤")
             if attendance_sheet:
                 try:
-                    today = date.today()
+                    today = tw_today()
                     if today.day <= 5:
                         start_date = (today.replace(day=1) - timedelta(days=1)).replace(day=21)
                         end_date = today.replace(day=5)
@@ -1174,7 +1239,7 @@ def handle_message(event):
         elif message_text == "系統狀態" and user_role == "ADMIN":
             reply_text = f"📊 系統狀態\n"
             reply_text += f"Session 數: {len(session_states)}\n"
-            reply_text += f"今日專案: {len([s for s in session_states.values() if s.work_date == date.today().strftime('%Y/%m/%d')])}"
+            reply_text += f"今日專案: {len([s for s in session_states.values() if s.work_date == tw_today().strftime('%Y/%m/%d')])}"
         
         # === ADMIN 手動結算 ===
         elif message_text == "立即結算" and user_role == "ADMIN":
