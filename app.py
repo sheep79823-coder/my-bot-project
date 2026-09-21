@@ -555,7 +555,7 @@ def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, no
             "",
             note if note else f"項目: {project_name}",
             update_time,
-            "",      # 第 8 欄：加班時數（離場時才填）
+            None,    # 第 8 欄：加班時數由 Sheet 公式計算。必須給 None（不寫入），寫空字串也會擋住陣列公式
             owners,  # 第 9 欄：負責的經理 LINE ID（用來在服務重啟後還原各自的專案權限）
         ]
         attendance_sheet.append_row(new_row)
