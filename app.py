@@ -98,6 +98,16 @@ except Exception as e:
     attendance_sheet = None
     summary_sheet = None
 
+# 確保出勤表有第 9 欄「負責人ID」（記錄各筆簽到的負責經理）
+try:
+    if attendance_sheet:
+        if attendance_sheet.col_count < 9:
+            attendance_sheet.add_cols(9 - attendance_sheet.col_count)
+        if not str(attendance_sheet.cell(1, 9).value or '').strip():
+            attendance_sheet.update_cell(1, 9, '負責人ID')
+except Exception as e:
+    print(f"⚠️ 無法建立「負責人ID」欄位: {e}")
+
 # [優化] 主動垃圾回收
 @app.after_request
 def after_request(response):
@@ -526,7 +536,7 @@ def sync_to_hr(action, name, work_date_minguo, rec_time, project=""):
         return False
 
 
-def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, note=""):
+def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, note="", owners=""):
     """立即寫入簽到記錄"""
     if not attendance_sheet:
         print(f"❌ write_person_to_sheet 失敗: attendance_sheet 未初始化（Sheets連線失敗）")
@@ -544,7 +554,9 @@ def write_person_to_sheet(work_date, project_name, person_name, sign_in_time, no
             "",
             "",
             note if note else f"項目: {project_name}",
-            update_time
+            update_time,
+            "",      # 第 8 欄：加班時數（離場時才填）
+            owners,  # 第 9 欄：負責的經理 LINE ID（用來在服務重啟後還原各自的專案權限）
         ]
         attendance_sheet.append_row(new_row)
         print(f"✅ 已即時寫入 {person_name} 的簽到記錄")
@@ -717,7 +729,8 @@ class DailySession:
             add_time = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
         
         if name not in [s['name'] for s in self.staff]:
-            if write_person_to_sheet(self.work_date, self.project_name, name, add_time, note or ""):
+            if write_person_to_sheet(self.work_date, self.project_name, name, add_time, note or "",
+                                     owners=",".join(sorted(self.authorized_users))):
                 self.staff.append({"name": name, "add_time": add_time, "note": note})
                 return True
         return False
@@ -746,15 +759,13 @@ def get_or_create_session(work_date, project_name, user_id):
 _last_rebuild = {}
 
 def rebuild_sessions_from_sheet(work_date, user_id):
-    """服務休眠/重啟後記憶體裡的日報 Session 會消失。
-    從 Google Sheet 當天的簽到列還原「尚未離場」的人員，避免出現「找不到有效的日報記錄」。
-    回傳是否有還原到任何人。"""
-    if not attendance_sheet or get_user_role(user_id) is None:
+    """服務休眠/重啟後記憶體裡的日報 Session 會消失，從 Google Sheet 當天「尚未離場」的簽到列還原。
+    權限原則：經理只能還原/管理「自己負責」的專案；總管理(ADMIN)可還原全部。
+    Sheet 第 9 欄「負責人ID」記錄了該筆簽到的負責經理；沒有這欄資料的舊紀錄只有總管理能還原。
+    回傳是否有還原到此人有權限的待離場人員。"""
+    role = get_user_role(user_id)
+    if not attendance_sheet or role is None:
         return False
-    now = time.time()
-    if now - _last_rebuild.get(work_date, 0) < 30:  # 避免連續輸入錯誤時狂讀 Sheet
-        return False
-    _last_rebuild[work_date] = now
     try:
         records = attendance_sheet.get_all_records()
     except Exception as e:
@@ -769,21 +780,27 @@ def rebuild_sessions_from_sheet(work_date, user_id):
         name = str(rec.get('姓名', '')).strip()
         if not name or str(rec.get('離場時間', '')).strip():
             continue  # 已經離場的不需要還原
+        owners = {x.strip() for x in str(rec.get('負責人ID', '')).split(',') if x.strip()}
+        if role != "ADMIN" and user_id not in owners:
+            continue  # 經理只還原自己的專案
         m = re.match(r'項目[:：]\s*(.+)', str(rec.get('備註', '')).strip())
         project = m.group(1).strip() if m else ""
-        add_time = None
         t = re.search(r'(\d{1,2}):(\d{2})', str(rec.get('簽到時間', '')))
-        if t and greg:
-            add_time = datetime.datetime(greg.year, greg.month, greg.day,
-                                         int(t.group(1)), int(t.group(2)), tzinfo=TW_TZ)
-        if add_time is None:
+        if not (t and greg):
             continue
-        session = get_or_create_session(work_date, project, user_id)
-        if name not in [x['name'] for x in session.staff]:
-            session.staff.append({"name": name, "add_time": add_time, "note": "還原"})
-            restored = True
+        add_time = datetime.datetime(greg.year, greg.month, greg.day,
+                                     int(t.group(1)), int(t.group(2)), tzinfo=TW_TZ)
+        with session_lock:
+            key = f"{work_date}_{project}"
+            if key not in session_states:
+                session_states[key] = DailySession(work_date, project)
+            session = session_states[key]
+            session.authorized_users.update(owners)  # 只還原原本的負責人，不授權給發指令的人
+            if name not in [x['name'] for x in session.staff]:
+                session.staff.append({"name": name, "add_time": add_time, "note": "還原"})
+        restored = True
     if restored:
-        print(f"[還原Session] 已從 Sheet 還原 {work_date} 的日報人員")
+        print(f"[還原Session] 已從 Sheet 還原 {work_date} 的待離場人員 (user={role})")
     return restored
 
 def find_session_for_user(user_id, project_name=None, work_date=None):
@@ -1135,7 +1152,7 @@ def handle_message(event):
                 if len(set(active_projects)) > 1:
                     reply_text = f"⚠️ 有多個專案，請用: 人員離場@專案名稱"
                 else:
-                    reply_text = "❌ 找不到有效的日報記錄"
+                    reply_text = "❌ 找不到你負責的待離場日報（經理只能操作自己開的專案，需要協助請聯絡總管理）"
         
         # === 查詢出勤 ===
         elif message_text == "查詢本期出勤":
