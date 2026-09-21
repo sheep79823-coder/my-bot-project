@@ -618,9 +618,9 @@ def update_person_checkout(work_date, person_name, checkout_time, sign_in_time, 
             attendance_sheet.update_cell(target_row, 4, checkout_time.strftime('%H:%M'))
             attendance_sheet.update_cell(target_row, 5, days)
             attendance_sheet.update_cell(target_row, 6, remark.strip())
-            # 若有加班時數，寫入第 8 欄（加班時數）
-            if overtime_hours > 0:
-                attendance_sheet.update_cell(target_row, 8, overtime_hours)
+            # 第 8 欄「加班時數」改由 Google Sheet 的公式依「離場時間」自動計算（H2 的 ARRAYFORMULA），
+            # 這樣人工修改離場時間後加班時數會跟著更新。這裡絕對不能再寫入該欄，
+            # 否則會擋住整欄的陣列公式。加班時數仍會記在備註供參考。
             print(f"✅ 已更新 {person_name} 的離場記錄: {days} 天, 加班 {overtime_hours}h")
             # 同步到 HR 系統（需要 work_date，從 attendance_sheet 的記錄取）
             record_date = records[target_row - 2].get('日期', '')
